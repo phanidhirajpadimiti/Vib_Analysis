@@ -1,0 +1,819 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Vibration Analysis Dashboard</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg:       #f4f6f9;
+      --surface:  #ffffff;
+      --border:   #e2e6ed;
+      --text:     #1a1a2e;
+      --muted:    #6b7280;
+      --accent:   #3b82f6;
+      --green:    #10b981;
+      --red:      #ef4444;
+      --amber:    #f59e0b;
+      --radius:   10px;
+      --shadow:   0 1px 3px rgba(0,0,0,.06), 0 1px 2px rgba(0,0,0,.04);
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.5;
+    }
+
+    /* ---- header ---- */
+    header {
+      background: var(--text);
+      color: #fff;
+      padding: 16px 32px;
+      display: flex;
+      align-items: center;
+      gap: 14px;
+    }
+    header h1 { font-size: 1.15rem; font-weight: 600; letter-spacing: -.02em; }
+    header .tag {
+      font-size: .68rem;
+      background: rgba(255,255,255,.12);
+      padding: 3px 10px;
+      border-radius: 20px;
+      font-weight: 500;
+    }
+
+    /* ---- controls ---- */
+    .controls {
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+      padding: 14px 32px;
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      flex-wrap: wrap;
+    }
+    .controls label {
+      font-size: .82rem;
+      font-weight: 600;
+      color: var(--muted);
+    }
+    .controls select {
+      height: 38px;
+      min-width: 220px;
+      border-radius: var(--radius);
+      font-size: .85rem;
+      border: 1px solid var(--border);
+      padding: 0 12px;
+      background: #fff;
+      cursor: pointer;
+      outline: none;
+    }
+    .controls select:focus { border-color: var(--accent); }
+
+    .machine-meta {
+      margin-left: auto;
+      font-size: .8rem;
+      color: var(--muted);
+      display: flex;
+      gap: 16px;
+    }
+    .machine-meta strong { color: var(--text); }
+
+    /* ---- sensor tabs ---- */
+    .sensor-tabs {
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+      padding: 0 32px;
+      display: none;
+      align-items: stretch;
+      gap: 0;
+    }
+    .sensor-tabs.visible { display: flex; }
+
+    .sensor-tab {
+      padding: 12px 20px;
+      font-size: .82rem;
+      font-weight: 500;
+      color: var(--muted);
+      cursor: pointer;
+      border-bottom: 2px solid transparent;
+      transition: all .15s;
+      white-space: nowrap;
+    }
+    .sensor-tab:hover { color: var(--text); background: var(--bg); }
+    .sensor-tab.active {
+      color: var(--accent);
+      border-bottom-color: var(--accent);
+      font-weight: 600;
+    }
+    .sensor-tab .tab-id {
+      display: block;
+      font-size: .72rem;
+      color: var(--muted);
+      font-weight: 400;
+    }
+    .sensor-tab.active .tab-id { color: var(--accent); }
+
+    .tab-actions {
+      margin-left: auto;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 8px 0;
+    }
+
+    /* ---- buttons ---- */
+    .btn {
+      height: 36px;
+      border-radius: var(--radius);
+      font-size: .82rem;
+      border: 1px solid var(--border);
+      padding: 0 18px;
+      cursor: pointer;
+      font-weight: 600;
+      transition: all .15s;
+      outline: none;
+    }
+    .btn:disabled { opacity: .5; cursor: not-allowed; }
+    .btn-primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+    .btn-primary:hover:not(:disabled) { background: #2563eb; }
+    .btn-outline { background: var(--surface); color: var(--text); }
+    .btn-outline:hover:not(:disabled) { background: var(--bg); }
+    .btn-compare { background: #7c3aed; color: #fff; border-color: #7c3aed; }
+    .btn-compare:hover:not(:disabled) { background: #6d28d9; }
+
+    /* ---- main ---- */
+    main { padding: 24px 32px; max-width: 1440px; margin: 0 auto; }
+
+    /* ---- result card ---- */
+    .result-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+      padding: 20px 24px;
+      margin-bottom: 20px;
+      display: none;
+      gap: 20px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+    .result-card.visible { display: flex; }
+
+    .badge {
+      display: inline-block;
+      padding: 5px 18px;
+      border-radius: 20px;
+      font-size: .82rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: .04em;
+    }
+    .badge.healthy   { background: #d1fae5; color: #065f46; }
+    .badge.unhealthy { background: #fee2e2; color: #991b1b; }
+    .badge.unknown   { background: #fef3c7; color: #92400e; }
+    .badge.error     { background: #fee2e2; color: #991b1b; }
+
+    .result-sensor { font-size: .82rem; color: var(--muted); }
+    .result-sensor strong { color: var(--text); }
+    .rationale { font-size: .88rem; color: var(--muted); flex: 1; min-width: 200px; }
+
+    /* ---- single sensor plot grid (2x2) ---- */
+    .plot-grid {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 16px;
+    }
+    @media (max-width: 860px) { .plot-grid { grid-template-columns: 1fr; } }
+
+    /* ---- compare grid (4 rows x 4 cols) ---- */
+    .compare-grid {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 12px;
+    }
+    @media (max-width: 1100px) { .compare-grid { grid-template-columns: repeat(2, 1fr); } }
+
+    .compare-grid .row-label {
+      grid-column: 1 / -1;
+      font-size: .82rem;
+      font-weight: 700;
+      color: var(--text);
+      padding: 10px 0 2px;
+      border-bottom: 1px solid var(--border);
+    }
+
+    /* ---- plot cards ---- */
+    .plot-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+      overflow: hidden;
+    }
+    .plot-card .plot-label {
+      padding: 8px 14px;
+      font-size: .72rem;
+      font-weight: 600;
+      color: var(--muted);
+      border-bottom: 1px solid var(--border);
+      text-transform: uppercase;
+      letter-spacing: .03em;
+    }
+    .plot-card img { width: 100%; height: auto; display: block; }
+    .plot-card .placeholder {
+      height: 220px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: var(--border);
+      font-size: .85rem;
+    }
+
+    /* ---- empty state ---- */
+    .empty-state {
+      text-align: center;
+      padding: 70px 20px;
+      color: var(--muted);
+    }
+    .empty-state svg { width: 56px; height: 56px; margin-bottom: 14px; opacity: .3; }
+    .empty-state p { font-size: .92rem; }
+
+    /* ---- spinner ---- */
+    .spinner-overlay {
+      position: fixed; inset: 0;
+      background: rgba(255,255,255,.72);
+      display: none;
+      align-items: center;
+      justify-content: center;
+      z-index: 100;
+    }
+    .spinner-overlay.active { display: flex; }
+    .spinner {
+      width: 44px; height: 44px;
+      border: 4px solid var(--border);
+      border-top-color: var(--accent);
+      border-radius: 50%;
+      animation: spin .7s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* ---- section heading ---- */
+    .section-heading {
+      font-size: .9rem;
+      font-weight: 700;
+      color: var(--text);
+      margin-bottom: 14px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .section-heading .dim { color: var(--muted); font-weight: 400; }
+
+    /* ---- agent button ---- */
+    .btn-agent {
+      background: linear-gradient(135deg, #f59e0b, #ef4444);
+      color: #fff;
+      border: none;
+      font-weight: 700;
+      letter-spacing: .02em;
+    }
+    .btn-agent:hover:not(:disabled) {
+      background: linear-gradient(135deg, #d97706, #dc2626);
+    }
+
+    /* ---- machine result card ---- */
+    .machine-result {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+      padding: 0;
+      margin-bottom: 20px;
+      display: none;
+      overflow: hidden;
+    }
+    .machine-result.visible { display: block; }
+
+    .machine-result-header {
+      padding: 18px 24px;
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      flex-wrap: wrap;
+      border-bottom: 1px solid var(--border);
+    }
+    .machine-result-header .badge { font-size: .88rem; }
+    .machine-result-header .mr-title {
+      font-size: .95rem;
+      font-weight: 700;
+      color: var(--text);
+    }
+    .machine-result-header .mr-rationale {
+      font-size: .88rem;
+      color: var(--muted);
+      flex: 1;
+      min-width: 200px;
+    }
+
+    /* per-sensor table */
+    .sensor-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: .84rem;
+    }
+    .sensor-table th {
+      text-align: left;
+      padding: 10px 16px;
+      background: var(--bg);
+      color: var(--muted);
+      font-weight: 600;
+      font-size: .76rem;
+      text-transform: uppercase;
+      letter-spacing: .04em;
+      border-bottom: 1px solid var(--border);
+    }
+    .sensor-table td {
+      padding: 10px 16px;
+      border-bottom: 1px solid var(--border);
+    }
+    .sensor-table tr:last-child td { border-bottom: none; }
+
+    .badge-sm {
+      display: inline-block;
+      padding: 2px 10px;
+      border-radius: 12px;
+      font-size: .74rem;
+      font-weight: 600;
+      text-transform: uppercase;
+    }
+    .badge-sm.healthy   { background: #d1fae5; color: #065f46; }
+    .badge-sm.unhealthy { background: #fee2e2; color: #991b1b; }
+    .badge-sm.monitor   { background: #fef3c7; color: #92400e; }
+    .badge-sm.unknown   { background: #e5e7eb; color: #4b5563; }
+
+    /* reasoning trace */
+    .reasoning-section {
+      padding: 14px 24px;
+      border-top: 1px solid var(--border);
+    }
+    .reasoning-toggle {
+      font-size: .82rem;
+      font-weight: 600;
+      color: var(--accent);
+      cursor: pointer;
+      user-select: none;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .reasoning-toggle .arrow {
+      transition: transform .2s;
+      font-size: .7rem;
+    }
+    .reasoning-toggle.open .arrow { transform: rotate(90deg); }
+
+    .reasoning-body {
+      display: none;
+      padding-top: 10px;
+    }
+    .reasoning-body.open { display: block; }
+
+    .tool-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      background: #ede9fe;
+      color: #5b21b6;
+      border-radius: 6px;
+      padding: 3px 10px;
+      font-size: .74rem;
+      font-weight: 600;
+      margin: 2px 3px;
+    }
+    .tool-chip .tool-args {
+      color: #7c3aed;
+      font-weight: 400;
+    }
+
+    .agent-summary {
+      margin-top: 10px;
+      font-size: .84rem;
+      color: var(--muted);
+      line-height: 1.6;
+      background: var(--bg);
+      padding: 12px 14px;
+      border-radius: var(--radius);
+    }
+
+    .recommendation {
+      padding: 12px 24px;
+      background: #eff6ff;
+      border-top: 1px solid #dbeafe;
+      font-size: .84rem;
+      color: #1e40af;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .recommendation strong { color: #1e3a8a; }
+  </style>
+</head>
+<body>
+
+<header>
+  <h1>Vibration Analysis Dashboard</h1>
+</header>
+
+<!-- Machine selector -->
+<div class="controls">
+  <label for="machineSelect">Machine</label>
+  <select id="machineSelect">
+    <option value="">Loading…</option>
+  </select>
+  <div class="machine-meta" id="machineMeta"></div>
+</div>
+
+<!-- Sensor position tabs -->
+<div class="sensor-tabs" id="sensorTabs">
+  <!-- filled dynamically -->
+  <div class="tab-actions">
+    <button class="btn btn-outline" id="plotOnlyBtn" disabled>Show Plots</button>
+    <button class="btn btn-primary" id="analyzeBtn" disabled>Analyze Sensor</button>
+    <button class="btn btn-compare" id="compareBtn" disabled>Compare All Sensors</button>
+    <button class="btn btn-agent" id="agentBtn" disabled>Analyze Machine (AI Agent)</button>
+  </div>
+</div>
+
+<main>
+  <!-- Single-sensor AI result -->
+  <div class="result-card" id="resultCard">
+    <span class="badge" id="labelBadge"></span>
+    <span class="result-sensor" id="resultSensor"></span>
+    <p class="rationale" id="rationaleText"></p>
+  </div>
+
+  <!-- Machine-level agentic result -->
+  <div class="machine-result" id="machineResult">
+    <div class="machine-result-header">
+      <span class="badge" id="mrBadge"></span>
+      <span class="mr-title" id="mrTitle"></span>
+      <p class="mr-rationale" id="mrRationale"></p>
+    </div>
+    <table class="sensor-table">
+      <thead>
+        <tr><th>Sensor</th><th>Position</th><th>Status</th><th>Finding</th></tr>
+      </thead>
+      <tbody id="mrSensorBody"></tbody>
+    </table>
+    <div class="recommendation" id="mrRecommendation"></div>
+    <div class="reasoning-section">
+      <div class="reasoning-toggle" id="reasoningToggle">
+        <span class="arrow">&#9654;</span> Agent Reasoning &amp; Tool Calls
+      </div>
+      <div class="reasoning-body" id="reasoningBody">
+        <div id="toolChips"></div>
+        <div class="agent-summary" id="agentSummary"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Empty state -->
+  <div id="emptyState" class="empty-state">
+    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"
+            d="M3 13.125C3 12.504 3.504 12 4.125 12h2.25c.621 0 1.125.504 1.125 1.125v6.75C7.5 20.496 6.996 21 6.375 21h-2.25A1.125 1.125 0 013 19.875v-6.75zM9.75 8.625c0-.621.504-1.125 1.125-1.125h2.25c.621 0 1.125.504 1.125 1.125v11.25c0 .621-.504 1.125-1.125 1.125h-2.25a1.125 1.125 0 01-1.125-1.125V8.625zM16.5 4.125c0-.621.504-1.125 1.125-1.125h2.25C20.496 3 21 3.504 21 4.125v15.75c0 .621-.504 1.125-1.125 1.125h-2.25a1.125 1.125 0 01-1.125-1.125V4.125z" />
+    </svg>
+    <p>Select a machine to begin. Pick a sensor tab then <strong>Show Plots</strong> or <strong>Compare All</strong>.</p>
+  </div>
+
+  <!-- Single sensor view (2x2) -->
+  <div id="singleView" style="display:none">
+    <div class="section-heading" id="singleHeading"></div>
+    <div class="plot-grid" id="singleGrid"></div>
+  </div>
+
+  <!-- Compare view (all sensors) -->
+  <div id="compareView" style="display:none">
+    <div class="section-heading" id="compareHeading"></div>
+    <div class="compare-grid" id="compareGrid"></div>
+  </div>
+</main>
+
+<div class="spinner-overlay" id="spinner">
+  <div class="spinner"></div>
+</div>
+
+<script>
+const API = window.location.origin;
+
+const machineSelect   = document.getElementById("machineSelect");
+const machineMeta     = document.getElementById("machineMeta");
+const sensorTabs      = document.getElementById("sensorTabs");
+const analyzeBtn      = document.getElementById("analyzeBtn");
+const plotOnlyBtn     = document.getElementById("plotOnlyBtn");
+const compareBtn      = document.getElementById("compareBtn");
+const agentBtn        = document.getElementById("agentBtn");
+const resultCard      = document.getElementById("resultCard");
+const labelBadge      = document.getElementById("labelBadge");
+const resultSensor    = document.getElementById("resultSensor");
+const rationaleText   = document.getElementById("rationaleText");
+const emptyState      = document.getElementById("emptyState");
+const singleView      = document.getElementById("singleView");
+const singleHeading   = document.getElementById("singleHeading");
+const singleGrid      = document.getElementById("singleGrid");
+const compareView     = document.getElementById("compareView");
+const compareHeading  = document.getElementById("compareHeading");
+const compareGrid     = document.getElementById("compareGrid");
+const spinner         = document.getElementById("spinner");
+const machineResult   = document.getElementById("machineResult");
+const mrBadge         = document.getElementById("mrBadge");
+const mrTitle         = document.getElementById("mrTitle");
+const mrRationale     = document.getElementById("mrRationale");
+const mrSensorBody    = document.getElementById("mrSensorBody");
+const mrRecommendation= document.getElementById("mrRecommendation");
+const reasoningToggle = document.getElementById("reasoningToggle");
+const reasoningBody   = document.getElementById("reasoningBody");
+const toolChips       = document.getElementById("toolChips");
+const agentSummary    = document.getElementById("agentSummary");
+
+let machinesData = [];
+let currentMachine = null;
+let currentSensor = null;
+
+const POSITION_ORDER = ["drive_end", "non_drive_end", "gearbox", "base"];
+const POSITION_LABELS = {
+  drive_end: "Drive End",
+  non_drive_end: "Non-Drive End",
+  gearbox: "Gearbox",
+  base: "Base",
+};
+const COMBOS = [
+  { axis: "x", feature: "accel_peak", label: "X — Accel Peak" },
+  { axis: "y", feature: "accel_peak", label: "Y — Accel Peak" },
+  { axis: "x", feature: "vel_rms",    label: "X — Vel RMS" },
+  { axis: "y", feature: "vel_rms",    label: "Y — Vel RMS" },
+];
+
+// ── Data loading ──
+
+async function loadMachines() {
+  try {
+    const res = await fetch(`${API}/machines`);
+    machinesData = await res.json();
+
+    machineSelect.innerHTML = '<option value="">— Select Machine —</option>';
+    machinesData.forEach(m => {
+      const opt = document.createElement("option");
+      opt.value = m.machine_id;
+      opt.textContent = `${m.machine_id}  (${m.machine_type})`;
+      machineSelect.appendChild(opt);
+    });
+  } catch (e) {
+    machineSelect.innerHTML = '<option value="">Error loading machines</option>';
+  }
+}
+
+// ── Machine selection ──
+
+function onMachineChange() {
+  const mid = machineSelect.value;
+  currentMachine = machinesData.find(m => m.machine_id === mid) || null;
+  currentSensor = null;
+  hideAll();
+
+  if (!currentMachine) {
+    machineMeta.innerHTML = "";
+    sensorTabs.classList.remove("visible");
+    emptyState.style.display = "block";
+    return;
+  }
+
+  machineMeta.innerHTML =
+    `<span>Type: <strong>${currentMachine.machine_type}</strong></span>` +
+    `<span>Sensors: <strong>${currentMachine.sensors.length}</strong></span>`;
+
+  buildSensorTabs();
+  sensorTabs.classList.add("visible");
+  emptyState.style.display = "block";
+}
+
+function buildSensorTabs() {
+  const existing = sensorTabs.querySelectorAll(".sensor-tab");
+  existing.forEach(t => t.remove());
+
+  const actions = sensorTabs.querySelector(".tab-actions");
+
+  const sorted = [...currentMachine.sensors].sort(
+    (a, b) => POSITION_ORDER.indexOf(a.sensor_position) - POSITION_ORDER.indexOf(b.sensor_position)
+  );
+
+  sorted.forEach((s, i) => {
+    const tab = document.createElement("div");
+    tab.className = "sensor-tab" + (i === 0 ? " active" : "");
+    tab.dataset.sensorId = s.sensor_id;
+    tab.innerHTML =
+      `${POSITION_LABELS[s.sensor_position] || s.sensor_position}` +
+      `<span class="tab-id">${s.sensor_id}</span>`;
+    tab.addEventListener("click", () => selectSensorTab(tab, s));
+    sensorTabs.insertBefore(tab, actions);
+  });
+
+  if (sorted.length > 0) {
+    currentSensor = sorted[0];
+    analyzeBtn.disabled = false;
+    plotOnlyBtn.disabled = false;
+    compareBtn.disabled = false;
+    agentBtn.disabled = false;
+  }
+}
+
+function selectSensorTab(tab, sensor) {
+  sensorTabs.querySelectorAll(".sensor-tab").forEach(t => t.classList.remove("active"));
+  tab.classList.add("active");
+  currentSensor = sensor;
+  analyzeBtn.disabled = false;
+  plotOnlyBtn.disabled = false;
+}
+
+// ── Views ──
+
+function hideAll() {
+  resultCard.classList.remove("visible");
+  machineResult.classList.remove("visible");
+  singleView.style.display = "none";
+  compareView.style.display = "none";
+  emptyState.style.display = "none";
+}
+
+function plotUrl(sensorId, axis, feature) {
+  return `${API}/sensor/${sensorId}/plot/${axis}/${feature}?t=${Date.now()}`;
+}
+
+function showSingleSensor(sensor) {
+  hideAll();
+  const pos = POSITION_LABELS[sensor.sensor_position] || sensor.sensor_position;
+  singleHeading.innerHTML =
+    `${sensor.sensor_id} <span class="dim">· ${pos} · ${currentMachine.machine_id}</span>`;
+
+  singleGrid.innerHTML = COMBOS.map(c =>
+    `<div class="plot-card">
+       <div class="plot-label">${c.label}</div>
+       <img src="${plotUrl(sensor.sensor_id, c.axis, c.feature)}" alt="${c.label}" />
+     </div>`
+  ).join("");
+
+  singleView.style.display = "block";
+}
+
+function showCompareAll() {
+  hideAll();
+  compareHeading.innerHTML =
+    `${currentMachine.machine_id} <span class="dim">· ${currentMachine.machine_type} · All Sensors</span>`;
+
+  const sorted = [...currentMachine.sensors].sort(
+    (a, b) => POSITION_ORDER.indexOf(a.sensor_position) - POSITION_ORDER.indexOf(b.sensor_position)
+  );
+
+  let html = "";
+  sorted.forEach(s => {
+    const pos = POSITION_LABELS[s.sensor_position] || s.sensor_position;
+    html += `<div class="row-label">${pos} — ${s.sensor_id}</div>`;
+    html += COMBOS.map(c =>
+      `<div class="plot-card">
+         <div class="plot-label">${c.label}</div>
+         <img src="${plotUrl(s.sensor_id, c.axis, c.feature)}" alt="${c.label}" />
+       </div>`
+    ).join("");
+  });
+
+  compareGrid.innerHTML = html;
+  compareView.style.display = "block";
+}
+
+function showResult(sensor, label, rationale) {
+  const pos = POSITION_LABELS[sensor.sensor_position] || sensor.sensor_position;
+  labelBadge.textContent = label;
+  labelBadge.className = "badge " + label;
+  resultSensor.innerHTML = `<strong>${sensor.sensor_id}</strong> · ${pos} · ${currentMachine.machine_id}`;
+  rationaleText.textContent = rationale;
+  resultCard.classList.add("visible");
+}
+
+function showMachineResult(data) {
+  hideAll();
+
+  // Header
+  mrBadge.textContent = data.machine_label;
+  mrBadge.className = "badge " + data.machine_label;
+  mrTitle.textContent = `${data.machine_id} · ${data.machine_type}`;
+  mrRationale.textContent = data.machine_rationale;
+
+  // Per-sensor table
+  mrSensorBody.innerHTML = data.sensors.map(s => {
+    const posLabel = POSITION_LABELS[s.position] || s.position;
+    return `<tr>
+      <td><strong>${s.sensor_id}</strong></td>
+      <td>${posLabel}</td>
+      <td><span class="badge-sm ${s.label}">${s.label}</span></td>
+      <td>${s.finding}</td>
+    </tr>`;
+  }).join("");
+
+  // Recommendation
+  mrRecommendation.innerHTML = `<strong>Recommendation:</strong> ${data.recommended_action}`;
+
+  // Tool calls
+  if (data.tool_calls && data.tool_calls.length > 0) {
+    toolChips.innerHTML = data.tool_calls.map(tc => {
+      const argsStr = Object.values(tc.args).join(", ");
+      return `<span class="tool-chip">${tc.tool}<span class="tool-args">(${argsStr})</span></span>`;
+    }).join("");
+  } else {
+    toolChips.innerHTML = '<span style="font-size:.82rem;color:var(--muted);">No tool calls were made.</span>';
+  }
+
+  // Agent reasoning summary
+  agentSummary.textContent = data.tools_reasoning || "No additional reasoning provided.";
+
+  // Collapse reasoning by default
+  reasoningToggle.classList.remove("open");
+  reasoningBody.classList.remove("open");
+
+  // Show the compare view underneath the result card
+  showCompareAll();
+  machineResult.classList.add("visible");
+}
+
+// ── Actions ──
+
+async function runAnalysis() {
+  if (!currentSensor) return;
+  spinner.classList.add("active");
+  resultCard.classList.remove("visible");
+  machineResult.classList.remove("visible");
+  showSingleSensor(currentSensor);
+
+  try {
+    const res = await fetch(`${API}/sensor/${currentSensor.sensor_id}/analyze`);
+    const data = await res.json();
+    showResult(currentSensor, data.label, data.rationale);
+  } catch (e) {
+    showResult(currentSensor, "error", "Request failed — is the server running?");
+  } finally {
+    spinner.classList.remove("active");
+  }
+}
+
+async function runAgentAnalysis() {
+  if (!currentMachine) return;
+  spinner.classList.add("active");
+  resultCard.classList.remove("visible");
+  machineResult.classList.remove("visible");
+
+  try {
+    const res = await fetch(`${API}/machine/${currentMachine.machine_id}/agent-analyze`);
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ detail: "Unknown error" }));
+      throw new Error(err.detail || `HTTP ${res.status}`);
+    }
+    const data = await res.json();
+    showMachineResult(data);
+  } catch (e) {
+    hideAll();
+    machineResult.classList.add("visible");
+    mrBadge.textContent = "error";
+    mrBadge.className = "badge error";
+    mrTitle.textContent = currentMachine.machine_id;
+    mrRationale.textContent = `Agent analysis failed: ${e.message}`;
+    mrSensorBody.innerHTML = "";
+    mrRecommendation.innerHTML = "";
+    toolChips.innerHTML = "";
+    agentSummary.textContent = "";
+  } finally {
+    spinner.classList.remove("active");
+  }
+}
+
+// ── Event listeners ──
+
+machineSelect.addEventListener("change", onMachineChange);
+plotOnlyBtn.addEventListener("click", () => { if (currentSensor) showSingleSensor(currentSensor); });
+analyzeBtn.addEventListener("click", runAnalysis);
+compareBtn.addEventListener("click", showCompareAll);
+agentBtn.addEventListener("click", runAgentAnalysis);
+
+reasoningToggle.addEventListener("click", () => {
+  reasoningToggle.classList.toggle("open");
+  reasoningBody.classList.toggle("open");
+});
+
+loadMachines();
+</script>
+
+</body>
+</html>
