@@ -4,11 +4,11 @@ Integration tests for FastAPI endpoints — uses TestClient, no live server need
 
 import os
 
-import pytest
-
 os.environ.setdefault("GEMINI_API_KEY", "test-key-not-used")
 
+import pytest
 from fastapi.testclient import TestClient
+
 from api import app
 
 
@@ -29,7 +29,7 @@ class TestSensorsEndpoint:
         resp = client.get("/sensors")
         assert resp.status_code == 200
         sensors = resp.json()
-        assert len(sensors) == 8  # 2 machines × 4 positions
+        assert len(sensors) == 8
 
     def test_sensor_has_required_fields(self, client):
         resp = client.get("/sensors")
@@ -68,7 +68,7 @@ class TestPlotEndpoint:
         resp = client.get("/sensor/SENS-T001/plot/x/accel_peak")
         assert resp.status_code == 200
         assert resp.headers["content-type"] == "image/png"
-        assert len(resp.content) > 1000  # non-trivial PNG
+        assert len(resp.content) > 1000
 
     def test_invalid_axis_400(self, client):
         resp = client.get("/sensor/SENS-T001/plot/z/accel_peak")
@@ -87,4 +87,33 @@ class TestDashboard:
     def test_serves_html(self, client):
         resp = client.get("/")
         assert resp.status_code == 200
-        assert "Vibration Analysis Dashboard" in resp.text
+        assert "VibLabel" in resp.text
+
+
+class TestLabelSummary:
+    def test_returns_summary(self, client):
+        resp = client.get("/labels/summary")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "total_machines" in data
+        assert data["total_machines"] == 2
+        assert data["labeled"] == 0
+
+
+class TestLabelExport:
+    def test_returns_csv_header(self, client):
+        resp = client.get("/labels/export")
+        assert resp.status_code == 200
+        assert "sensor_id" in resp.text
+        assert "final_label" in resp.text
+
+
+class TestGetLabels:
+    def test_no_labels_returns_empty(self, client):
+        resp = client.get("/labels")
+        assert resp.status_code == 200
+        assert resp.json() == []
+
+    def test_unknown_machine_label_404(self, client):
+        resp = client.get("/label/machine/MACH-NOPE")
+        assert resp.status_code == 404

@@ -15,7 +15,7 @@ def test_db(tmp_path, monkeypatch):
     db_path = str(tmp_path / "test_vibration.db")
 
     rng = np.random.default_rng(99)
-    n = 500  # ~90 days at daily frequency, enough for 30-day window comparisons
+    n = 500
     time_index = pd.date_range("2025-01-01", periods=n, freq="12h")
 
     rows = []

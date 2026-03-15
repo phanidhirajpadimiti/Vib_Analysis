@@ -1,6 +1,8 @@
-# Vibration Analysis — Agentic AI Diagnostics
+# VibLabel — Agentic Data Labeling for Vibration Analysis
 
-An end-to-end vibration monitoring system that uses a **LangGraph agent** backed by Google Gemini to diagnose industrial machinery health. The agent receives sensor plots, then autonomously calls analytical tools (stats, trend detection, cross-sensor comparison) before producing a structured machine-level diagnosis.
+An LLM-powered labeling tool that uses a **LangGraph agent** backed by Google Gemini to generate quality labels for industrial vibration sensor data. The labeled data is designed for training or validating machine learning models for predictive maintenance.
+
+Instead of replacing ML inference, this tool **produces the training and validation data** that ML models need — automating what traditionally requires expensive domain experts annotating sensor readings by hand.
 
 ## Architecture
 
@@ -8,60 +10,71 @@ An end-to-end vibration monitoring system that uses a **LangGraph agent** backed
 
 ```mermaid
 flowchart TB
-    subgraph FRONTEND["<b>Frontend Dashboard</b> &nbsp;·&nbsp; static/index.html"]
+    subgraph FRONTEND["<b>Labeling Dashboard</b> &nbsp;·&nbsp; static/index.html"]
         direction LR
         F1["Machine Selector"]
         F2["Sensor Plot Grid"]
-        F3["Agent Analysis UI"]
+        F3["Label + Review UI"]
+        F4["Batch Label &amp; Export"]
     end
 
     subgraph API["<b>FastAPI Backend</b> &nbsp;·&nbsp; api.py"]
         direction LR
-        R1["/sensors &nbsp; /machines"]
-        R2["/sensor/{id}/plot"]
-        R3["/sensor/{id}/analyze"]
-        R4["/machine/{id}/agent-analyze"]
+        R1["POST /label/machine/{id}"]
+        R2["POST /label/batch"]
+        R3["PUT /label/.../review"]
+        R4["GET /labels/export"]
     end
 
     subgraph AGENT["<b>LangGraph Agent</b> &nbsp;·&nbsp; agent.py"]
         direction TB
         subgraph GRAPH[" "]
             direction LR
-            P["Prepare<br/><i>load data + generate plots</i>"]
+            P["Prepare<br/><i>load data + plots</i>"]
             LLM["Agent Node<br/><i>Gemini 2.5 Flash</i>"]
-            TN["Tool Node<br/><i>auto-execute calls</i>"]
-            FIN["Finalize<br/><i>parse JSON diagnosis</i>"]
+            TN["Tool Node<br/><i>auto-execute</i>"]
+            FIN["Finalize<br/><i>parse labels</i>"]
         end
     end
 
     subgraph TOOLS["<b>Agent Tools</b>"]
         direction LR
-        T1["get_sensor_stats<br/><i>mean · std · trend · kurtosis</i>"]
-        T2["compare_recent_vs_historical<br/><i>30-day vs baseline shift</i>"]
-        T3["get_cross_sensor_comparison<br/><i>4 positions side-by-side</i>"]
+        T1["get_iso_assessment<br/><i>ISO 10816 zone + trend projection</i>"]
+        T2["get_sensor_stats<br/><i>mean · std · trend · kurtosis</i>"]
+        T3["compare_recent_vs_historical<br/><i>30-day vs baseline shift</i>"]
+        T4["get_cross_sensor_comparison<br/><i>4 positions side-by-side</i>"]
     end
 
-    subgraph DATA["<b>SQLite Database</b> &nbsp;·&nbsp; vibration_data.db"]
+    subgraph STORE["<b>Label Storage</b> &nbsp;·&nbsp; SQLite"]
         direction LR
-        DB[("52 sensors &nbsp;·&nbsp; 13 machines &nbsp;·&nbsp; ~1.3M rows &nbsp;·&nbsp; 90 days")]
+        DB[("machine_labels<br/>sensor_labels<br/>+ human overrides")]
     end
 
-    FRONTEND -- "HTTP / JSON" --> API
-    R4 -- "invoke" --> AGENT
+    subgraph EXPORT["<b>ML Pipeline</b>"]
+        CSV["vibration_labels.csv<br/><i>final_label = human override ?? agent label</i>"]
+    end
+
+    FRONTEND -- "HTTP" --> API
+    R1 & R2 -- "invoke" --> AGENT
     P --> LLM
-    LLM <-- "tool calls / results" --> TN
+    LLM <-- "tool calls" --> TN
     LLM --> FIN
     TN --> TOOLS
-    TOOLS -- "SQL queries" --> DATA
-    R1 & R2 & R3 -- "direct queries" --> DATA
+    TOOLS -- "SQL" --> STORE
+    FIN -- "save labels" --> STORE
+    R3 -- "human review" --> STORE
+    R4 -- "export" --> CSV
+    STORE --> CSV
 
     style FRONTEND fill:#e8f4fd,stroke:#2196f3,stroke-width:2px,color:#0d47a1
     style API fill:#fff3e0,stroke:#ff9800,stroke-width:2px,color:#e65100
     style AGENT fill:#f3e5f5,stroke:#9c27b0,stroke-width:2px,color:#4a148c
     style GRAPH fill:#f3e5f5,stroke:none
     style TOOLS fill:#e8f5e9,stroke:#4caf50,stroke-width:2px,color:#1b5e20
-    style DATA fill:#fce4ec,stroke:#e91e63,stroke-width:2px,color:#880e4f
+    style STORE fill:#fce4ec,stroke:#e91e63,stroke-width:2px,color:#880e4f
+    style EXPORT fill:#f0fdf4,stroke:#16a34a,stroke-width:2px,color:#166534
     style DB fill:#fce4ec,stroke:#e91e63,color:#880e4f
+    style CSV fill:#f0fdf4,stroke:#16a34a,color:#166534
 
     style P fill:#ce93d8,stroke:#7b1fa2,color:#fff
     style LLM fill:#ba68c8,stroke:#7b1fa2,color:#fff
@@ -71,39 +84,54 @@ flowchart TB
     style T1 fill:#a5d6a7,stroke:#388e3c,color:#1b5e20
     style T2 fill:#a5d6a7,stroke:#388e3c,color:#1b5e20
     style T3 fill:#a5d6a7,stroke:#388e3c,color:#1b5e20
+    style T4 fill:#a5d6a7,stroke:#388e3c,color:#1b5e20
 ```
 
-### Agent Flow (LangGraph State Machine)
+### Labeling Flow
 
 ```mermaid
 flowchart LR
     START(("START")) --> PREP
 
-    PREP["<b>prepare</b><br/>Load machine data<br/>Generate 8 overview plots<br/>Build multimodal prompt"]
+    PREP["<b>prepare</b><br/>Load machine data<br/>Generate 8 overview plots<br/>Include ISO 10816 context"]
     PREP --> AGT
 
-    AGT["<b>agent</b><br/>Gemini 2.5 Flash<br/>Reads plots + tool results<br/>Decides next action"]
+    AGT["<b>agent</b><br/>Gemini 2.5 Flash<br/>Reads plots + tool results<br/>Applies labeling guidelines"]
 
-    AGT -->|"tool_calls detected"| TOOL["<b>tools</b><br/>ToolNode auto-executes<br/>get_sensor_stats<br/>compare_recent_vs_historical<br/>get_cross_sensor_comparison"]
-    TOOL -->|"results appended<br/>to message history"| AGT
+    AGT -->|"tool_calls"| TOOL["<b>tools</b><br/>get_iso_assessment<br/>get_sensor_stats<br/>compare_recent_vs_historical<br/>get_cross_sensor_comparison"]
+    TOOL -->|"results"| AGT
 
-    AGT -->|"no more tool calls"| FIN["<b>finalize</b><br/>Extract all tool calls<br/>Parse structured JSON<br/>Return diagnosis"]
-    FIN --> DONE(("END"))
+    AGT -->|"done"| FIN["<b>finalize</b><br/>Parse structured labels<br/>Assign confidence levels<br/>Save to label store"]
+    FIN --> REVIEW["<b>human review</b><br/>Accept / Override<br/>per-sensor labels"]
+    REVIEW --> OUT(("EXPORT<br/>CSV"))
 
     style START fill:#4caf50,stroke:#2e7d32,color:#fff
-    style DONE fill:#f44336,stroke:#c62828,color:#fff
+    style OUT fill:#16a34a,stroke:#166534,color:#fff
     style PREP fill:#90caf9,stroke:#1565c0,color:#0d47a1
     style AGT fill:#ba68c8,stroke:#7b1fa2,color:#fff
     style TOOL fill:#a5d6a7,stroke:#388e3c,color:#1b5e20
     style FIN fill:#ffcc80,stroke:#ef6c00,color:#e65100
+    style REVIEW fill:#e8f4fd,stroke:#2196f3,color:#0d47a1
 ```
+
+## Why This Approach
+
+| Challenge | How VibLabel solves it |
+|-----------|----------------------|
+| Labeled industrial data is expensive | LLM agent automates the domain-expert annotation workflow |
+| Labels need to be grounded, not subjective | ISO 10816 zones provide objective severity criteria |
+| Edge cases need human judgment | Human-in-the-loop review for low-confidence labels |
+| Labels need to be explainable | Every label includes rationale, tool evidence, and ISO zone reference |
+| ML models need structured training data | One-click CSV export with `final_label` column |
 
 ## Key Features
 
-- **Agentic diagnosis** — the LLM doesn't just classify; it uses tools to gather quantitative evidence across all sensors on a machine before making a decision
-- **Machine-level reasoning** — cross-references 4 sensor positions (drive end, non-drive end, gearbox, base) to identify fault mechanisms
-- **Realistic synthetic data** — 3 fault categories (clearly healthy, clearly faulty, ambiguous) with correlated cross-sensor fault patterns
-- **Interactive dashboard** — machine selector, per-sensor plot grids, one-click agent analysis with reasoning trace
+- **Agentic labeling** — the LLM uses tools to gather quantitative evidence before assigning labels, not just pattern-matching on plots
+- **ISO 10816 grounded** — labels reference international vibration severity zones (A/B/C/D) with trend projections
+- **Confidence scoring** — each label has a confidence level (high/medium/low) that prioritizes human review effort
+- **Human-in-the-loop** — reviewers can accept or override agent labels per-sensor, with overrides taking precedence in exports
+- **Batch processing** — label all unlabeled machines in one click
+- **ML-ready export** — CSV with `final_label` column (human override ?? agent label) for direct pipeline ingestion
 
 ## Tech Stack
 
@@ -113,29 +141,29 @@ flowchart LR
 | LLM | Google Gemini 2.5 Flash (multimodal — reads plots + calls tools) |
 | LLM integration | LangChain (`langchain-google-genai`) |
 | Backend | FastAPI + Uvicorn |
-| Database | SQLite (via pandas) |
-| Plotting | Matplotlib (thread-safe, no pyplot) |
-| Frontend | Vanilla HTML/CSS/JS (single-file dashboard) |
+| Database | SQLite (sensor data + label storage) |
+| Plotting | Matplotlib (thread-safe, Figure API) |
+| Frontend | Vanilla HTML/CSS/JS |
 
 ## Project Structure
 
 ```
-├── config.py            # Central configuration (model, DB path, constants)
-├── models.py            # Pydantic schemas (shared across API + agent)
-├── db.py                # Database connection management + reusable queries
+├── config.py            # Central configuration (ISO thresholds, model, constants)
+├── models.py            # Pydantic schemas (labeling, review, export)
+├── db.py                # DB helpers + label storage (save, review, export)
 ├── plotting.py          # Shared scatter-plot renderer
 │
 ├── generate_data.py     # Synthetic data generator (13 machines × 4 sensors)
-├── query_data.py        # CLI database explorer + machine-level plots
+├── query_data.py        # CLI database explorer
 │
-├── agent.py             # LangGraph agentic analysis (graph + tools)
-├── api.py               # FastAPI endpoints (data, plots, AI analysis)
+├── agent.py             # LangGraph agent (4 tools including ISO assessment)
+├── api.py               # FastAPI endpoints (label, review, export, data, plots)
 │
-├── static/index.html    # Frontend dashboard
-├── tests/               # pytest suite (tools + API integration)
+├── static/index.html    # Labeling dashboard with human review
+├── tests/               # pytest suite
 │
-├── .env.example         # Template for required environment variables
-├── requirements.txt     # Python dependencies
+├── .env.example         # Template for API key
+├── requirements.txt     # Dependencies
 └── README.md
 ```
 
@@ -173,37 +201,40 @@ open http://localhost:8000
 pytest tests/ -v
 ```
 
-Tests use an auto-generated in-memory database (no API key needed, no LLM calls).
+## How the Labeling Works
 
-## How the Agent Works
+1. **Select a machine** (or click "Label All Unlabeled" for batch mode)
+2. **Agent labels** — the LLM inspects 8 sensor plots, calls ISO assessment + statistical tools, and assigns per-sensor labels with confidence
+3. **Review** — low-confidence labels are flagged; reviewers can accept or override any label
+4. **Export** — download `vibration_labels.csv` where `final_label` = human override when present, otherwise agent label
 
-When you click **"Analyze Machine (AI Agent)"** in the dashboard:
+### Labeling Guidelines (embedded in agent prompt)
 
-1. **Prepare** — loads all sensor data for the machine, generates 8 overview scatter plots (X-axis accel + velocity for each of 4 positions)
-2. **Agent** — sends the plots to Gemini with a diagnostic prompt and 3 bound tools
-3. **Tool loop** — Gemini autonomously decides which tools to call:
-   - `get_sensor_stats` — detailed per-sensor statistics (mean, std, trend slope, kurtosis)
-   - `compare_recent_vs_historical` — detects degradation by comparing last 30 days vs baseline
-   - `get_cross_sensor_comparison` — highlights anomalous positions relative to siblings
-4. **Finalize** — parses the structured JSON diagnosis with per-sensor labels, overall machine verdict, and recommended action
-
-The agent typically makes 5-8 tool calls before converging on a diagnosis.
+| Condition | Label | Typical Confidence |
+|-----------|-------|--------------------|
+| ISO Zone A or stable B, no trend | healthy | high |
+| Zone B with upward trend, borderline B/C | monitor | medium |
+| Zone C or D, strong trend, clear fault | unhealthy | high |
+| Conflicting cross-sensor signals | varies | low (flagged for review) |
 
 ## Data Model
 
-Each machine has **4 sensors** at standardized positions with different vibration sensitivity:
+Each machine has **4 sensors** at standardized positions:
 
-| Position | Accel Multiplier | Typical Fault Signature |
-|----------|-----------------|------------------------|
+| Position | Accel Multiplier | ISO Relevance |
+|----------|-----------------|---------------|
 | Drive End | 1.00× | Bearing faults appear strongest here |
 | Non-Drive End | 0.85× | Misalignment shows on both ends |
 | Gearbox | 0.90× | Gear-mesh faults are localized here |
 | Base | 0.65× | Structural looseness elevates base noise |
 
-Three health categories are generated:
-- **Healthy** (5 machines) — normal baseline vibration
-- **Faulty** (3 machines) — clear fault signatures (bearing, misalignment, gear, looseness)
-- **Ambiguous** (5 machines) — subtle patterns that require cross-sensor reasoning
+ISO 10816 machine class assignments:
+
+| Machine Type | ISO Class | Zone B/C Boundary (vel RMS, mm/s) |
+|-------------|-----------|-----------------------------------|
+| Pump | Class II | 2.80 |
+| Fan | Class I | 1.80 |
+| Motor | Class III | 4.50 |
 
 ## License
 

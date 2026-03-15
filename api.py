@@ -1,42 +1,40 @@
 """
-FastAPI application — REST endpoints for vibration data, plots, and AI analysis.
+FastAPI application — REST endpoints for vibration data, plots, and labeling.
 """
 
-import io
 import logging
 import os
-import re
-import time
 
-import google.api_core.exceptions
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, Response
+from fastapi.responses import HTMLResponse, PlainTextResponse, Response
 from fastapi.staticfiles import StaticFiles
-from langchain_core.messages import HumanMessage
-from langchain_google_genai import ChatGoogleGenerativeAI
 
 from agent import run_machine_analysis
-from config import (
-    DB_PATH,
-    ENV_PATH,
-    FEATURE_LABELS,
-    GEMINI_MODEL,
-    INITIAL_BACKOFF_SECONDS,
-    MAX_RETRIES,
-    STATIC_DIR,
+from config import DB_PATH, ENV_PATH, FEATURE_LABELS, STATIC_DIR
+from db import (
+    export_labels_csv,
+    fetch_machines,
+    fetch_sensors,
+    get_all_labels,
+    get_connection,
+    get_label_summary,
+    get_machine_label,
+    load_sensor_df,
+    review_machine,
+    save_labels,
 )
-from db import fetch_machines, fetch_sensors, get_connection, load_sensor_df
 from models import (
+    LabelSummary,
     MachineAnalysisResult,
     MachineInfo,
+    MachineReviewRequest,
     SensorAssessment,
     SensorInfo,
-    SingleAnalysisResult,
     ToolCallRecord,
 )
-from plotting import render_scatter, to_base64
+from plotting import render_scatter
 
 # ---------------------------------------------------------------------------
 # Bootstrap
@@ -54,8 +52,8 @@ if not api_key:
     raise ValueError("Please set the GEMINI_API_KEY in your .env file.")
 
 app = FastAPI(
-    title="Vibration Analysis API",
-    description="Analyse vibration sensor data with Gemini multimodal vision.",
+    title="VibLabel — Agentic Data Labeling for Vibration Analysis",
+    description="LLM-powered labeling tool for industrial vibration sensor data.",
 )
 
 app.add_middleware(
@@ -65,100 +63,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-
-# ---------------------------------------------------------------------------
-# Gemini (single-sensor analysis uses a plain LLM, no tools)
-# ---------------------------------------------------------------------------
-_llm = None
-
-
-def _get_llm() -> ChatGoogleGenerativeAI:
-    global _llm
-    if _llm is None:
-        _llm = ChatGoogleGenerativeAI(
-            model=GEMINI_MODEL,
-            google_api_key=api_key,
-            temperature=0,
-        )
-    return _llm
-
-
-def _invoke_with_retry(content_parts: list) -> str:
-    """Send a multimodal message to Gemini with rate-limit retry. Returns text."""
-    llm = _get_llm()
-    msg = HumanMessage(content=content_parts)
-    for attempt in range(MAX_RETRIES):
-        try:
-            response = llm.invoke([msg])
-            return response.content
-        except google.api_core.exceptions.ResourceExhausted:
-            wait = INITIAL_BACKOFF_SECONDS * (2 ** attempt)
-            log.warning("Rate limited (attempt %d/%d), retrying in %ds",
-                        attempt + 1, MAX_RETRIES, wait)
-            if attempt == MAX_RETRIES - 1:
-                raise
-            time.sleep(wait)
-
-
-# ---------------------------------------------------------------------------
-# Single-sensor prompt + parser
-# ---------------------------------------------------------------------------
-ANALYSIS_PROMPT = """\
-You are an expert vibration analyst reviewing 4 time-series scatter plots for a
-single industrial sensor (acceleration peak and velocity RMS for both X and Y
-axes over approximately 3 months).
-
-Look for these fault signatures:
-  • Gradual upward trend (bearing wear / degradation)
-  • Sudden step-change in amplitude (fault onset)
-  • Recurring high-amplitude bursts at regular intervals (gear-mesh / looseness)
-  • Abnormally high baseline compared to typical machinery
-  • Elevated noise floor (structural looseness)
-
-Reply in EXACTLY this format (no markdown, no brackets):
-LABEL | RATIONALE
-
-LABEL must be one of: healthy, unhealthy
-RATIONALE must be a single concise sentence (≤ 40 words).
-"""
-
-_STRIP_RE = re.compile(r"[\[\]*`]")
-
-
-def _parse_gemini_response(text: str) -> tuple[str, str]:
-    cleaned = _STRIP_RE.sub("", text).strip()
-    first_line = cleaned.split("\n", 1)[0]
-
-    if "|" in first_line:
-        label_raw, rationale = first_line.split("|", 1)
-    else:
-        label_raw, rationale = first_line, cleaned
-
-    label = label_raw.strip().lower()
-    if label not in {"healthy", "unhealthy"}:
-        label = "unknown"
-
-    return label, rationale.strip()
-
-
-# ---------------------------------------------------------------------------
-# Helper: build 4 plots as base64 for a sensor
-# ---------------------------------------------------------------------------
-def _sensor_plot_parts(df, sensor_id: str, position: str) -> list[dict]:
-    """Generate 4 base64 plot parts (x/y × accel/vel) for a single sensor."""
-    parts: list[dict] = []
-    for axis in ("x", "y"):
-        axis_df = df[df["sensor_axis"] == axis]
-        for feature in ("accel_peak", "vel_rms"):
-            ylabel = FEATURE_LABELS[feature]
-            title = f"{sensor_id} ({position})  ·  {axis.upper()} Axis  ·  {ylabel}"
-            png = render_scatter(axis_df["time"], axis_df[feature], title, ylabel)
-            parts.append({
-                "type": "image_url",
-                "image_url": {"url": f"data:image/png;base64,{to_base64(png)}"},
-            })
-    return parts
 
 
 # ---------------------------------------------------------------------------
@@ -226,68 +130,142 @@ def get_sensor_plot(sensor_id: str, axis: str, feature: str):
 
 
 # ---------------------------------------------------------------------------
-# Endpoints — single-sensor AI analysis
+# Endpoints — labeling (agent)
 # ---------------------------------------------------------------------------
-@app.get("/sensor/{sensor_id}/analyze", response_model=SingleAnalysisResult)
-def analyze_single_sensor(sensor_id: str):
-    log.info("Single-sensor analysis for %s", sensor_id)
-
-    with get_connection() as conn:
-        df = load_sensor_df(conn, sensor_id)
-    if df.empty:
-        raise HTTPException(status_code=404, detail=f"No data for sensor {sensor_id}")
-
-    machine_id = df["machine_id"].iloc[0]
-    machine_type = df["machine_type"].iloc[0]
-    position = df["sensor_position"].iloc[0]
-
-    try:
-        parts: list[dict] = [{"type": "text", "text": ANALYSIS_PROMPT}]
-        parts.extend(_sensor_plot_parts(df, sensor_id, position))
-        text = _invoke_with_retry(parts)
-        label, rationale = _parse_gemini_response(text)
-        log.info("  %s → %s", sensor_id, label)
-    except Exception:
-        log.exception("Gemini call failed for %s", sensor_id)
-        label, rationale = "error", "AI analysis failed. Check server logs."
-
-    return SingleAnalysisResult(
-        sensor_id=sensor_id,
-        machine_id=machine_id,
-        sensor_position=position,
-        machine_type=machine_type,
-        label=label,
-        rationale=rationale,
-    )
-
-
-# ---------------------------------------------------------------------------
-# Endpoints — agentic machine-level analysis
-# ---------------------------------------------------------------------------
-@app.get("/machine/{machine_id}/agent-analyze", response_model=MachineAnalysisResult)
-def agent_analyze_machine(machine_id: str):
-    log.info("Agent analysis started for %s", machine_id)
+@app.post("/label/machine/{machine_id}", response_model=MachineAnalysisResult)
+def label_machine(machine_id: str):
+    """Run the agent labeler on a single machine. Persists labels to DB."""
+    log.info("Agent labeling started for %s", machine_id)
     try:
         result = run_machine_analysis(machine_id)
     except Exception:
-        log.exception("Agent analysis failed for %s", machine_id)
-        raise HTTPException(status_code=500, detail="Agent analysis failed. Check server logs.")
+        log.exception("Agent labeling failed for %s", machine_id)
+        raise HTTPException(status_code=500, detail="Agent labeling failed. Check server logs.")
 
     if "error" in result and not result.get("machine_label"):
         raise HTTPException(status_code=404, detail=result["error"])
 
-    log.info("Agent analysis complete for %s → %s", machine_id, result.get("machine_label"))
+    with get_connection() as conn:
+        save_labels(conn, result)
+
+    log.info("Agent labeling complete for %s → %s (%s confidence)",
+             machine_id, result.get("machine_label"), result.get("machine_confidence"))
+    return _result_to_response(result, machine_id)
+
+
+@app.post("/label/batch")
+def label_batch():
+    """Run the agent labeler on ALL unlabeled machines. Returns summary."""
+    with get_connection() as conn:
+        machines = fetch_machines(conn)
+        already_labeled = set()
+        try:
+            rows = conn.execute("SELECT machine_id FROM machine_labels").fetchall()
+            already_labeled = {r[0] for r in rows}
+        except Exception:
+            pass
+
+    to_label = [m for m in machines if m.machine_id not in already_labeled]
+    results = {"total": len(to_label), "succeeded": 0, "failed": 0, "errors": []}
+
+    for m in to_label:
+        try:
+            result = run_machine_analysis(m.machine_id)
+            if "error" in result and not result.get("machine_label"):
+                results["failed"] += 1
+                results["errors"].append({"machine_id": m.machine_id, "error": result["error"]})
+                continue
+            with get_connection() as conn:
+                save_labels(conn, result)
+            results["succeeded"] += 1
+            log.info("Batch labeled %s → %s", m.machine_id, result.get("machine_label"))
+        except Exception as e:
+            results["failed"] += 1
+            results["errors"].append({"machine_id": m.machine_id, "error": str(e)})
+            log.exception("Batch labeling failed for %s", m.machine_id)
+
+    return results
+
+
+# ---------------------------------------------------------------------------
+# Endpoints — labels (read)
+# ---------------------------------------------------------------------------
+@app.get("/labels")
+def get_labels():
+    """Return all stored labels with review status."""
+    with get_connection() as conn:
+        return get_all_labels(conn)
+
+
+@app.get("/labels/summary", response_model=LabelSummary)
+def labels_summary():
+    with get_connection() as conn:
+        return get_label_summary(conn)
+
+
+@app.get("/label/machine/{machine_id}")
+def get_machine_labels(machine_id: str):
+    """Return stored labels for a specific machine."""
+    with get_connection() as conn:
+        result = get_machine_label(conn, machine_id)
+    if not result:
+        raise HTTPException(status_code=404, detail=f"No labels for {machine_id}")
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Endpoints — human review
+# ---------------------------------------------------------------------------
+@app.put("/label/machine/{machine_id}/review")
+def submit_review(machine_id: str, body: MachineReviewRequest):
+    """Accept or override agent labels for a machine."""
+    with get_connection() as conn:
+        existing = get_machine_label(conn, machine_id)
+    if not existing:
+        raise HTTPException(status_code=404, detail=f"No labels for {machine_id}")
+
+    sensor_reviews = [s.dict() if hasattr(s, "dict") else s for s in body.sensors]
+    with get_connection() as conn:
+        review_machine(conn, machine_id, body.machine_label, body.machine_notes, sensor_reviews)
+
+    log.info("Review saved for %s (override=%s)", machine_id, body.machine_label or "none")
+    return {"status": "saved", "machine_id": machine_id}
+
+
+# ---------------------------------------------------------------------------
+# Endpoints — export
+# ---------------------------------------------------------------------------
+@app.get("/labels/export")
+def export_labels():
+    """Export all sensor labels as CSV. Human overrides take precedence
+    as the final_label column — ready for ML pipeline ingestion."""
+    with get_connection() as conn:
+        csv_text = export_labels_csv(conn)
+    return PlainTextResponse(
+        content=csv_text,
+        media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=vibration_labels.csv"},
+    )
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+def _result_to_response(result: dict, machine_id: str) -> MachineAnalysisResult:
     return MachineAnalysisResult(
         machine_id=result.get("machine_id", machine_id),
         machine_type=result.get("machine_type", ""),
         machine_label=result.get("machine_label", "unknown"),
+        machine_confidence=result.get("machine_confidence", "medium"),
         machine_rationale=result.get("machine_rationale", ""),
         sensors=[
             SensorAssessment(
                 sensor_id=s.get("sensor_id", ""),
                 position=s.get("position", ""),
                 label=s.get("label", "unknown"),
+                confidence=s.get("confidence", "medium"),
                 finding=s.get("finding", ""),
+                iso_zone=s.get("iso_zone", ""),
             )
             for s in result.get("sensors", [])
         ],

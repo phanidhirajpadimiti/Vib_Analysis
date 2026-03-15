@@ -2,7 +2,6 @@
 Central configuration — single source of truth for all shared constants.
 """
 
-import os
 from pathlib import Path
 
 # ── Paths ──
@@ -55,3 +54,21 @@ POSITION_LABELS = {
     "gearbox": "Gearbox",
     "base": "Base",
 }
+
+# ── ISO 10816 vibration severity ──
+# Zone boundaries are velocity RMS in mm/s.
+# A = Good, B = Acceptable, C = Tolerable (plan maintenance), D = Dangerous.
+ISO_MACHINE_CLASSES = {
+    "pump":  "II",
+    "fan":   "I",
+    "motor": "III",
+}
+
+ISO_THRESHOLDS = {
+    "I":   {"A_B": 0.71, "B_C": 1.80, "C_D": 4.50},
+    "II":  {"A_B": 1.12, "B_C": 2.80, "C_D": 7.10},
+    "III": {"A_B": 1.80, "B_C": 4.50, "C_D": 11.20},
+    "IV":  {"A_B": 2.80, "B_C": 7.10, "C_D": 18.00},
+}
+
+LABEL_TAXONOMY = ["healthy", "unhealthy", "monitor"]

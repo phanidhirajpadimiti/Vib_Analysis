@@ -4,13 +4,15 @@ Unit tests for agent tool functions — no LLM calls, just stat computation.
 
 import json
 
+import numpy as np
+
 from agent import (
     _compute_feature_stats,
-    get_cross_sensor_comparison,
-    get_sensor_stats,
     compare_recent_vs_historical,
+    get_cross_sensor_comparison,
+    get_iso_assessment,
+    get_sensor_stats,
 )
-import numpy as np
 
 
 class TestComputeFeatureStats:
@@ -87,5 +89,29 @@ class TestCrossSensorComparison:
 
     def test_unknown_machine_returns_error(self):
         raw = get_cross_sensor_comparison.invoke("MACH-NOPE")
+        result = json.loads(raw)
+        assert "error" in result
+
+
+class TestISOAssessment:
+    def test_returns_iso_class_and_zone(self):
+        raw = get_iso_assessment.invoke("SENS-T001")
+        result = json.loads(raw)
+        assert result["iso_class"] == "II"  # pump
+        assert "x_assessment" in result
+        assert result["x_assessment"]["zone"] in ("A", "B", "C", "D")
+
+    def test_motor_is_class_iii(self):
+        raw = get_iso_assessment.invoke("SENS-T005")
+        result = json.loads(raw)
+        assert result["iso_class"] == "III"  # motor
+
+    def test_includes_trend_projection(self):
+        raw = get_iso_assessment.invoke("SENS-T005")
+        result = json.loads(raw)
+        assert "trend_slope_per_day" in result["x_assessment"]
+
+    def test_unknown_sensor_returns_error(self):
+        raw = get_iso_assessment.invoke("SENS-NOPE")
         result = json.loads(raw)
         assert "error" in result

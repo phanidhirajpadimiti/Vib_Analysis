@@ -1,5 +1,9 @@
 """
-Agentic vibration analysis — LangGraph + Gemini with tool use.
+Agentic vibration data labeling — LangGraph + Gemini with tool use.
+
+The agent acts as an automated domain-expert annotator. It inspects sensor
+plots, uses statistical tools and ISO 10816 severity assessment, then produces
+structured labels (with confidence) for each sensor and the overall machine.
 
 Graph topology:
 
@@ -7,18 +11,12 @@ Graph topology:
                   │
                   ▼
                finalize ──▶ END
-
-The *prepare* node loads machine data and generates 8 overview plots.
-The *agent* node invokes Gemini (with bound tools) to reason.
-The *tools* node (LangGraph ToolNode) auto-executes any requested calls.
-The *finalize* node parses the structured JSON diagnosis from the last message.
 """
 
 import json
 import logging
 import os
 import re
-import sqlite3
 import time
 from typing import Annotated, TypedDict
 
@@ -34,17 +32,18 @@ from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode
 
 from config import (
-    DB_PATH,
     ENV_PATH,
     FEATURE_LABELS,
     GEMINI_MODEL,
     INITIAL_BACKOFF_SECONDS,
+    ISO_MACHINE_CLASSES,
+    ISO_THRESHOLDS,
     MAX_RETRIES,
     POSITION_ORDER,
-    SAMPLES_PER_DAY,
     RECENT_WINDOW_DAYS,
+    SAMPLES_PER_DAY,
 )
-from db import get_connection
+from db import get_connection, load_machine_df
 from plotting import render_scatter, to_base64
 
 log = logging.getLogger(__name__)
@@ -63,7 +62,7 @@ class AgentState(TypedDict):
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# Tools — each is self-contained and queries the DB directly
+# Tools
 # ═══════════════════════════════════════════════════════════════════════════
 
 def _compute_feature_stats(vals: np.ndarray) -> dict:
@@ -94,7 +93,7 @@ def get_sensor_stats(sensor_id: str) -> str:
     if df.empty:
         return json.dumps({"error": f"No data for {sensor_id}"})
 
-    result: dict = {"sensor_id": sensor_id, "position": df["sensor_position"].iloc[0]}
+    result = {"sensor_id": sensor_id, "position": df["sensor_position"].iloc[0]}
     for axis in ("x", "y"):
         adf = df[df["sensor_axis"] == axis]
         for feature in ("accel_peak", "vel_rms"):
@@ -126,7 +125,7 @@ def compare_recent_vs_historical(sensor_id: str) -> str:
     recent = df[df["time"] >= cutoff]
     total_days = (df["time"].max() - df["time"].min()).days
 
-    result: dict = {
+    result = {
         "sensor_id": sensor_id,
         "historical_days": total_days - RECENT_WINDOW_DAYS,
         "recent_days": RECENT_WINDOW_DAYS,
@@ -167,7 +166,7 @@ def get_cross_sensor_comparison(machine_id: str) -> str:
     sensors = []
     for sid in df["sensor_id"].unique():
         sdf = df[df["sensor_id"] == sid]
-        entry: dict = {"sensor_id": sid, "position": sdf["sensor_position"].iloc[0]}
+        entry = {"sensor_id": sid, "position": sdf["sensor_position"].iloc[0]}
         for axis in ("x", "y"):
             for feature in ("accel_peak", "vel_rms"):
                 vals = sdf[sdf["sensor_axis"] == axis][feature].values
@@ -185,11 +184,80 @@ def get_cross_sensor_comparison(machine_id: str) -> str:
     return json.dumps({"machine_id": machine_id, "sensors": sensors})
 
 
-TOOLS = [get_sensor_stats, compare_recent_vs_historical, get_cross_sensor_comparison]
+def _classify_iso_zone(vel_rms: float, thresholds: dict) -> str:
+    if vel_rms <= thresholds["A_B"]:
+        return "A"
+    if vel_rms <= thresholds["B_C"]:
+        return "B"
+    if vel_rms <= thresholds["C_D"]:
+        return "C"
+    return "D"
+
+
+@tool
+def get_iso_assessment(sensor_id: str) -> str:
+    """Assess a sensor against ISO 10816 vibration severity zones.
+    Returns the current zone (A/B/C/D), the zone boundaries for the machine
+    class, current velocity RMS, trend slope, and projected days until the
+    next zone boundary is crossed. Essential for grounding labels in
+    international standards."""
+    with get_connection() as conn:
+        df = pd.read_sql_query(
+            "SELECT sensor_axis, time, vel_rms, machine_type "
+            "FROM sensor_data WHERE sensor_id = ? ORDER BY time",
+            conn,
+            params=(sensor_id,),
+            parse_dates=["time"],
+        )
+    if df.empty:
+        return json.dumps({"error": f"No data for {sensor_id}"})
+
+    machine_type = df["machine_type"].iloc[0]
+    iso_class = ISO_MACHINE_CLASSES.get(machine_type, "II")
+    thresholds = ISO_THRESHOLDS[iso_class]
+
+    results = {"sensor_id": sensor_id, "iso_class": iso_class, "thresholds_mm_s": thresholds}
+    for axis in ("x", "y"):
+        adf = df[df["sensor_axis"] == axis].sort_values("time")
+        vals = adf["vel_rms"].values
+        if len(vals) < 2:
+            continue
+
+        current_mean = float(vals[-SAMPLES_PER_DAY:].mean()) if len(vals) >= SAMPLES_PER_DAY else float(vals.mean())
+        zone = _classify_iso_zone(current_mean, thresholds)
+
+        slope_per_sample = float(np.polyfit(np.arange(len(vals), dtype=float), vals, 1)[0])
+        slope_per_day = slope_per_sample * SAMPLES_PER_DAY
+
+        next_boundary = None
+        days_to_next = None
+        if zone == "A":
+            next_boundary = thresholds["A_B"]
+        elif zone == "B":
+            next_boundary = thresholds["B_C"]
+        elif zone == "C":
+            next_boundary = thresholds["C_D"]
+
+        if next_boundary and slope_per_day > 0.0001:
+            gap = next_boundary - current_mean
+            days_to_next = round(gap / slope_per_day, 1)
+
+        results[f"{axis}_assessment"] = {
+            "current_vel_rms": round(current_mean, 3),
+            "zone": zone,
+            "trend_slope_per_day": round(slope_per_day, 5),
+            "next_zone_boundary": next_boundary,
+            "days_to_next_zone": days_to_next,
+        }
+    return json.dumps(results)
+
+
+TOOLS = [get_sensor_stats, compare_recent_vs_historical,
+         get_cross_sensor_comparison, get_iso_assessment]
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# LLM (lazy-init so the env var is guaranteed to be loaded)
+# LLM (lazy-init)
 # ═══════════════════════════════════════════════════════════════════════════
 
 _llm = None
@@ -210,35 +278,57 @@ def _get_llm():
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# Agent prompt
+# Agent prompt — framed as a labeling task
 # ═══════════════════════════════════════════════════════════════════════════
 
 AGENT_PROMPT = """\
-You are an expert vibration analyst performing a MACHINE-LEVEL diagnosis.
+You are an expert vibration analyst acting as a DATA LABELER. Your job is to
+assign quality labels to sensor data that will be used to train or validate
+machine learning models for condition monitoring.
 
 ## Context
-Machine: {machine_id} (type: {machine_type})
+Machine: {machine_id} (type: {machine_type}, ISO 10816 class: {iso_class})
 Sensors: {sensor_list}
 
 I am providing you with 8 overview plots — the X-axis acceleration peak and
 X-axis velocity RMS for each of the 4 sensor positions on this machine.
 
+## Labeling guidelines
+Use the following criteria (grounded in ISO 10816):
+  - **healthy**: ISO Zone A or stable Zone B, no upward trend, consistent across positions
+  - **monitor**: Zone B with upward trend, borderline B/C, or conflicting cross-sensor signals
+  - **unhealthy**: Zone C or D, strong upward trend, or clear fault signature (bearing, misalignment, looseness)
+
 ## Your process
-1. Visually inspect the 8 plots for anomalies (trends, spikes, elevated baselines, noise)
-2. Use the available tools to quantify your observations:
+1. Visually inspect the 8 plots for anomalies
+2. Use tools to quantify observations:
+   - get_iso_assessment: assess each sensor against ISO 10816 zones (ALWAYS USE THIS)
    - get_sensor_stats: detailed statistics for one sensor
-   - compare_recent_vs_historical: last 30 days vs first 60 days
-   - get_cross_sensor_comparison: compare all 4 sensors side-by-side
-3. Cross-reference findings across sensor positions to identify the fault mechanism
-4. Produce your final diagnosis
+   - compare_recent_vs_historical: last 30 days vs baseline
+   - get_cross_sensor_comparison: compare all 4 positions side-by-side
+3. Cross-reference findings across sensor positions
+4. Assign labels with confidence levels
+
+## Confidence levels
+  - **high**: clear evidence, all signals agree
+  - **medium**: some ambiguity but balance of evidence favors the label
+  - **low**: conflicting signals, borderline case — flag for human review
 
 ## Required output format (strict)
-When you are done investigating, reply with EXACTLY this JSON (no markdown fences):
+Reply with EXACTLY this JSON (no markdown fences):
 {{
   "machine_label": "healthy" or "unhealthy" or "monitor",
-  "machine_rationale": "one sentence overall diagnosis",
+  "machine_confidence": "high" or "medium" or "low",
+  "machine_rationale": "one sentence grounded in ISO zones and tool results",
   "sensors": [
-    {{"sensor_id": "...", "position": "...", "label": "healthy/unhealthy/monitor", "finding": "one sentence"}},
+    {{
+      "sensor_id": "...",
+      "position": "...",
+      "label": "healthy/unhealthy/monitor",
+      "confidence": "high/medium/low",
+      "finding": "one sentence with ISO zone reference",
+      "iso_zone": "A/B/C/D"
+    }},
     ...for all 4 sensors
   ],
   "recommended_action": "one sentence recommendation",
@@ -256,19 +346,13 @@ def prepare(state: AgentState) -> dict:
     machine_id = state["machine_id"]
 
     with get_connection() as conn:
-        df = pd.read_sql_query(
-            "SELECT sensor_id, sensor_position, sensor_axis, "
-            "time, accel_peak, vel_rms, machine_type "
-            "FROM sensor_data WHERE machine_id = ?",
-            conn,
-            params=(machine_id,),
-            parse_dates=["time"],
-        )
+        df = load_machine_df(conn, machine_id)
 
     if df.empty:
         return {"machine_type": "unknown", "messages": []}
 
     machine_type = df["machine_type"].iloc[0]
+    iso_class = ISO_MACHINE_CLASSES.get(machine_type, "II")
     sensor_ids = (
         df.drop_duplicates("sensor_id")[["sensor_id", "sensor_position"]]
         .values.tolist()
@@ -279,12 +363,13 @@ def prepare(state: AgentState) -> dict:
         key=lambda s: POSITION_ORDER.index(s[1]) if s[1] in POSITION_ORDER else 99,
     )
 
-    content: list[dict] = [
+    content = [
         {
             "type": "text",
             "text": AGENT_PROMPT.format(
                 machine_id=machine_id,
                 machine_type=machine_type,
+                iso_class=iso_class,
                 sensor_list=sensor_list,
             ),
         }
@@ -332,7 +417,6 @@ def agent(state: AgentState) -> dict:
 
 
 def should_continue(state: AgentState) -> str:
-    """Route: tools if the LLM requested tool calls, otherwise finalize."""
     last = state["messages"][-1]
     if isinstance(last, AIMessage) and last.tool_calls:
         return "tools"
@@ -340,8 +424,8 @@ def should_continue(state: AgentState) -> str:
 
 
 def finalize(state: AgentState) -> dict:
-    """Parse the agent's final text into the structured diagnosis dict."""
-    tool_calls: list[dict] = []
+    """Parse the agent's final text into the structured labeling result."""
+    tool_calls = []
     for msg in state["messages"]:
         if isinstance(msg, AIMessage) and msg.tool_calls:
             for tc in msg.tool_calls:
@@ -359,7 +443,7 @@ def finalize(state: AgentState) -> dict:
 
 
 def _parse_agent_response(text: str) -> dict:
-    """Extract the JSON diagnosis from the agent's final text."""
+    """Extract the JSON labeling result from the agent's final text."""
     cleaned = re.sub(r"```(?:json)?\s*", "", text).strip()
     cleaned = re.sub(r"```\s*$", "", cleaned).strip()
 
@@ -375,6 +459,7 @@ def _parse_agent_response(text: str) -> dict:
 
     return {
         "machine_label": "unknown",
+        "machine_confidence": "low",
         "machine_rationale": text[:300],
         "sensors": [],
         "recommended_action": "Manual review needed — agent response could not be parsed.",
@@ -414,8 +499,8 @@ _graph = _build_graph()
 # ═══════════════════════════════════════════════════════════════════════════
 
 def run_machine_analysis(machine_id: str) -> dict:
-    """Run the full agentic analysis for a machine. Returns structured result."""
-    log.info("LangGraph agent analysis started for %s", machine_id)
+    """Run the full agentic labeling for a machine. Returns structured result."""
+    log.info("LangGraph agent labeling started for %s", machine_id)
 
     with get_connection() as conn:
         count = conn.execute(
