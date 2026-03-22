@@ -498,7 +498,11 @@ _graph = _build_graph()
 # Public API
 # ═══════════════════════════════════════════════════════════════════════════
 
-def run_machine_analysis(machine_id: str) -> dict:
+def run_machine_analysis(
+    machine_id: str,
+    tags: list = None,
+    metadata: dict = None,
+) -> dict:
     """Run the full agentic labeling for a machine. Returns structured result."""
     log.info("LangGraph agent labeling started for %s", machine_id)
 
@@ -510,6 +514,13 @@ def run_machine_analysis(machine_id: str) -> dict:
     if count == 0:
         return {"error": f"No data for machine {machine_id}"}
 
+    config = {
+        "recursion_limit": 30,
+        "run_name": f"label-{machine_id}",
+        "tags": tags or [machine_id],
+        "metadata": metadata or {"machine_id": machine_id},
+    }
+
     result = _graph.invoke(
         {
             "machine_id": machine_id,
@@ -517,7 +528,7 @@ def run_machine_analysis(machine_id: str) -> dict:
             "messages": [],
             "final_result": {},
         },
-        {"recursion_limit": 30},
+        config,
     )
 
     return result["final_result"]

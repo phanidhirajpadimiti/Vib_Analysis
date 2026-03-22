@@ -117,3 +117,34 @@ class TestGetLabels:
     def test_unknown_machine_label_404(self, client):
         resp = client.get("/label/machine/MACH-NOPE")
         assert resp.status_code == 404
+
+
+class TestRunMachineAnalysisSignature:
+    """Verify run_machine_analysis accepts tags/metadata kwargs (no LangSmith key needed)."""
+
+    def test_accepts_tags_and_metadata_kwargs(self):
+        from unittest.mock import MagicMock, patch
+
+        with patch("agent._graph") as mock_graph:
+            mock_graph.invoke.return_value = {
+                "final_result": {
+                    "machine_id": "MACH-T1",
+                    "machine_label": "healthy",
+                    "machine_confidence": "high",
+                    "sensors": [],
+                }
+            }
+            from agent import run_machine_analysis
+
+            result = run_machine_analysis(
+                "MACH-T1",
+                tags=["MACH-T1", "test"],
+                metadata={"machine_id": "MACH-T1", "source": "test"},
+            )
+            assert result["machine_label"] == "healthy"
+
+            call_args = mock_graph.invoke.call_args
+            config = call_args[0][1]
+            assert config["run_name"] == "label-MACH-T1"
+            assert "test" in config["tags"]
+            assert config["metadata"]["source"] == "test"

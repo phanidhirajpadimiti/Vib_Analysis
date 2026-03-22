@@ -137,7 +137,11 @@ def label_machine(machine_id: str):
     """Run the agent labeler on a single machine. Persists labels to DB."""
     log.info("Agent labeling started for %s", machine_id)
     try:
-        result = run_machine_analysis(machine_id)
+        result = run_machine_analysis(
+            machine_id,
+            tags=[machine_id, "single"],
+            metadata={"machine_id": machine_id, "source": "single"},
+        )
     except Exception:
         log.exception("Agent labeling failed for %s", machine_id)
         raise HTTPException(status_code=500, detail="Agent labeling failed. Check server logs.")
@@ -170,7 +174,11 @@ def label_batch():
 
     for m in to_label:
         try:
-            result = run_machine_analysis(m.machine_id)
+            result = run_machine_analysis(
+                m.machine_id,
+                tags=[m.machine_id, "batch"],
+                metadata={"machine_id": m.machine_id, "source": "batch"},
+            )
             if "error" in result and not result.get("machine_label"):
                 results["failed"] += 1
                 results["errors"].append({"machine_id": m.machine_id, "error": result["error"]})

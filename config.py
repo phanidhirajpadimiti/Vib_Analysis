@@ -2,6 +2,7 @@
 Central configuration — single source of truth for all shared constants.
 """
 
+import os
 from pathlib import Path
 
 # ── Paths ──
@@ -72,3 +73,6 @@ ISO_THRESHOLDS = {
 }
 
 LABEL_TAXONOMY = ["healthy", "unhealthy", "monitor"]
+
+# ── LangSmith observability (opt-in via LANGCHAIN_TRACING_V2 env var) ──
+LANGSMITH_PROJECT = os.getenv("LANGCHAIN_PROJECT", "viblabel")
