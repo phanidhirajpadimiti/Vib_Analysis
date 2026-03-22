@@ -1,16 +1,18 @@
 """
-Agentic vibration data labeling — LangGraph + Gemini with tool use.
+Agentic vibration data labeling — dual-provider LangGraph agent.
 
-The agent acts as an automated domain-expert annotator. It inspects sensor
-plots, uses statistical tools and ISO 10816 severity assessment, then produces
-structured labels (with confidence) for each sensor and the overall machine.
+Supports two modes controlled by USE_LOCAL_SLM in config:
+  - Cloud (default): Gemini 2.5 Flash with multi-turn tool calling
+  - Local: Llama 3.2 Vision 11B via Ollama with single-pass pre-computed tools
 
-Graph topology:
+Graph topology (both modes share the same graph):
 
-    prepare ──▶ agent ◀──▶ tools
+    prepare ──▶ agent ◀──▶ tools    (Gemini: multi-turn tool loop)
                   │
                   ▼
                finalize ──▶ END
+
+    prepare ──▶ agent ──▶ finalize  (SLM: single-pass, no tool_calls)
 """
 
 import json
@@ -27,6 +29,7 @@ from dotenv import load_dotenv
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.tools import tool
 from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_ollama import ChatOllama
 from langgraph.graph import END, StateGraph
 from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode
@@ -39,9 +42,12 @@ from config import (
     ISO_MACHINE_CLASSES,
     ISO_THRESHOLDS,
     MAX_RETRIES,
+    OLLAMA_BASE_URL,
+    OLLAMA_MODEL,
     POSITION_ORDER,
     RECENT_WINDOW_DAYS,
     SAMPLES_PER_DAY,
+    USE_LOCAL_SLM,
 )
 from db import get_connection, load_machine_df
 from plotting import render_scatter, to_base64
@@ -58,6 +64,7 @@ class AgentState(TypedDict):
     messages: Annotated[list, add_messages]
     machine_id: str
     machine_type: str
+    use_local_slm: bool
     final_result: dict
 
 
@@ -257,24 +264,34 @@ TOOLS = [get_sensor_stats, compare_recent_vs_historical,
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# LLM (lazy-init)
+# LLM (lazy-init, dual-provider cache)
 # ═══════════════════════════════════════════════════════════════════════════
 
-_llm = None
+_llm_cache: dict = {}
 
 
-def _get_llm():
-    global _llm
-    if _llm is None:
-        api_key = os.getenv("GEMINI_API_KEY")
-        if not api_key:
-            raise ValueError("GEMINI_API_KEY not set. Check your .env file.")
-        _llm = ChatGoogleGenerativeAI(
-            model=GEMINI_MODEL,
-            google_api_key=api_key,
-            temperature=0,
-        ).bind_tools(TOOLS)
-    return _llm
+def _get_llm(use_local: bool = False):
+    """Return the LLM for the requested provider. Each provider is initialized
+    once and cached. Gemini gets tool binding; Ollama does not (single-pass)."""
+    key = "ollama" if use_local else "gemini"
+    if key not in _llm_cache:
+        if use_local:
+            log.info("Initializing local SLM: %s at %s", OLLAMA_MODEL, OLLAMA_BASE_URL)
+            _llm_cache[key] = ChatOllama(
+                model=OLLAMA_MODEL,
+                base_url=OLLAMA_BASE_URL,
+                temperature=0.1,
+            )
+        else:
+            api_key = os.getenv("GEMINI_API_KEY")
+            if not api_key:
+                raise ValueError("GEMINI_API_KEY not set. Check your .env file.")
+            _llm_cache[key] = ChatGoogleGenerativeAI(
+                model=GEMINI_MODEL,
+                google_api_key=api_key,
+                temperature=0,
+            ).bind_tools(TOOLS)
+    return _llm_cache[key]
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -336,13 +353,84 @@ Reply with EXACTLY this JSON (no markdown fences):
 }}
 """
 
+# ── SLM prompt (single-pass — all tool results pre-computed) ──────────────
+
+SLM_AGENT_PROMPT = """\
+You are an expert vibration analyst acting as a DATA LABELER.
+
+## Context
+Machine: {machine_id} (type: {machine_type}, ISO 10816 class: {iso_class})
+Sensors: {sensor_list}
+
+I am providing you with overview plots for each sensor position, plus
+pre-computed analysis results from our diagnostic tools.
+
+## Pre-computed tool results
+{tool_results}
+
+## Labeling criteria (ISO 10816)
+- healthy: ISO Zone A or stable Zone B, no upward trend, consistent across positions
+- monitor: Zone B with upward trend, borderline B/C, or conflicting cross-sensor signals
+- unhealthy: Zone C or D, strong upward trend, or clear fault signature
+
+## Confidence levels
+- high: clear evidence, all signals agree
+- medium: some ambiguity but balance of evidence favors the label
+- low: conflicting signals, borderline case — flag for human review
+
+## CRITICAL INSTRUCTIONS
+You MUST output ONLY valid JSON. No explanation, no markdown, no text before or
+after the JSON object. Your entire response must be parseable by json.loads().
+
+Output this exact JSON structure:
+{{
+  "machine_label": "healthy" or "unhealthy" or "monitor",
+  "machine_confidence": "high" or "medium" or "low",
+  "machine_rationale": "one sentence grounded in ISO zones and data",
+  "sensors": [
+    {{
+      "sensor_id": "...",
+      "position": "...",
+      "label": "healthy" or "unhealthy" or "monitor",
+      "confidence": "high" or "medium" or "low",
+      "finding": "one sentence with ISO zone reference",
+      "iso_zone": "A" or "B" or "C" or "D"
+    }}
+  ],
+  "recommended_action": "one sentence recommendation",
+  "tools_reasoning": "brief summary of what the data revealed"
+}}
+"""
+
+
+def _precompute_tool_results(machine_id: str, sensor_ids: list) -> str:
+    """Call all tools programmatically and format results as text for SLM."""
+    sections = []
+
+    sections.append("=== Cross-Sensor Comparison ===")
+    sections.append(get_cross_sensor_comparison.invoke(machine_id))
+
+    for sid, pos in sensor_ids:
+        sections.append(f"\n=== Sensor {sid} ({pos}) ===")
+        sections.append(f"ISO Assessment: {get_iso_assessment.invoke(sid)}")
+        sections.append(f"Statistics: {get_sensor_stats.invoke(sid)}")
+        sections.append(
+            f"Recent vs Historical: {compare_recent_vs_historical.invoke(sid)}"
+        )
+
+    return "\n".join(sections)
+
 
 # ═══════════════════════════════════════════════════════════════════════════
 # Graph nodes
 # ═══════════════════════════════════════════════════════════════════════════
 
 def prepare(state: AgentState) -> dict:
-    """Load machine data, generate 8 overview plots, build initial message."""
+    """Load machine data, generate overview plots, build initial message.
+
+    In SLM mode, all tool results are pre-computed and injected into the prompt
+    so the model can label in a single pass without tool calling.
+    """
     machine_id = state["machine_id"]
 
     with get_connection() as conn:
@@ -363,17 +451,24 @@ def prepare(state: AgentState) -> dict:
         key=lambda s: POSITION_ORDER.index(s[1]) if s[1] in POSITION_ORDER else 99,
     )
 
-    content = [
-        {
-            "type": "text",
-            "text": AGENT_PROMPT.format(
-                machine_id=machine_id,
-                machine_type=machine_type,
-                iso_class=iso_class,
-                sensor_list=sensor_list,
-            ),
-        }
-    ]
+    if state.get("use_local_slm", USE_LOCAL_SLM):
+        tool_results = _precompute_tool_results(machine_id, sorted_sensors)
+        prompt_text = SLM_AGENT_PROMPT.format(
+            machine_id=machine_id,
+            machine_type=machine_type,
+            iso_class=iso_class,
+            sensor_list=sensor_list,
+            tool_results=tool_results,
+        )
+    else:
+        prompt_text = AGENT_PROMPT.format(
+            machine_id=machine_id,
+            machine_type=machine_type,
+            iso_class=iso_class,
+            sensor_list=sensor_list,
+        )
+
+    content = [{"type": "text", "text": prompt_text}]
 
     for sid, pos in sorted_sensors:
         sdf = (
@@ -399,16 +494,22 @@ def prepare(state: AgentState) -> dict:
 
 
 def agent(state: AgentState) -> dict:
-    """Invoke the LLM with automatic retry on rate-limit errors."""
-    llm = _get_llm()
+    """Invoke the LLM with automatic retry on transient errors."""
+    use_local = state.get("use_local_slm", USE_LOCAL_SLM)
+    llm = _get_llm(use_local)
+    retryable = (
+        (ConnectionError, OSError)
+        if use_local
+        else (google.api_core.exceptions.ResourceExhausted,)
+    )
     for attempt in range(MAX_RETRIES):
         try:
             response = llm.invoke(state["messages"])
             return {"messages": [response]}
-        except google.api_core.exceptions.ResourceExhausted:
+        except retryable:
             wait = INITIAL_BACKOFF_SECONDS * (2 ** attempt)
             log.warning(
-                "Rate limited (attempt %d/%d), retrying in %ds",
+                "Retryable error (attempt %d/%d), retrying in %ds",
                 attempt + 1, MAX_RETRIES, wait,
             )
             if attempt == MAX_RETRIES - 1:
@@ -502,9 +603,17 @@ def run_machine_analysis(
     machine_id: str,
     tags: list = None,
     metadata: dict = None,
+    use_local_slm: bool = None,
 ) -> dict:
-    """Run the full agentic labeling for a machine. Returns structured result."""
-    log.info("LangGraph agent labeling started for %s", machine_id)
+    """Run the full agentic labeling for a machine. Returns structured result.
+
+    Args:
+        use_local_slm: Override the global USE_LOCAL_SLM flag for this request.
+                        None = use the global config default.
+    """
+    local = USE_LOCAL_SLM if use_local_slm is None else use_local_slm
+    provider = "ollama" if local else "gemini"
+    log.info("LangGraph agent labeling started for %s (provider=%s)", machine_id, provider)
 
     with get_connection() as conn:
         count = conn.execute(
@@ -518,7 +627,7 @@ def run_machine_analysis(
         "recursion_limit": 30,
         "run_name": f"label-{machine_id}",
         "tags": tags or [machine_id],
-        "metadata": metadata or {"machine_id": machine_id},
+        "metadata": {**(metadata or {"machine_id": machine_id}), "provider": provider},
     }
 
     result = _graph.invoke(
@@ -526,6 +635,7 @@ def run_machine_analysis(
             "machine_id": machine_id,
             "machine_type": "",
             "messages": [],
+            "use_local_slm": local,
             "final_result": {},
         },
         config,

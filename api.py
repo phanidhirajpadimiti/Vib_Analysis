@@ -6,7 +6,7 @@ import logging
 import os
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, PlainTextResponse, Response
 from fastapi.staticfiles import StaticFiles
@@ -133,14 +133,23 @@ def get_sensor_plot(sensor_id: str, axis: str, feature: str):
 # Endpoints — labeling (agent)
 # ---------------------------------------------------------------------------
 @app.post("/label/machine/{machine_id}", response_model=MachineAnalysisResult)
-def label_machine(machine_id: str):
-    """Run the agent labeler on a single machine. Persists labels to DB."""
-    log.info("Agent labeling started for %s", machine_id)
+def label_machine(
+    machine_id: str,
+    provider: str = Query("auto", pattern="^(auto|gemini|ollama)$"),
+):
+    """Run the agent labeler on a single machine. Persists labels to DB.
+
+    Query params:
+        provider: "gemini", "ollama", or "auto" (uses server default).
+    """
+    use_local = None if provider == "auto" else (provider == "ollama")
+    log.info("Agent labeling started for %s (provider=%s)", machine_id, provider)
     try:
         result = run_machine_analysis(
             machine_id,
             tags=[machine_id, "single"],
             metadata={"machine_id": machine_id, "source": "single"},
+            use_local_slm=use_local,
         )
     except Exception:
         log.exception("Agent labeling failed for %s", machine_id)
@@ -158,8 +167,11 @@ def label_machine(machine_id: str):
 
 
 @app.post("/label/batch")
-def label_batch():
+def label_batch(
+    provider: str = Query("auto", pattern="^(auto|gemini|ollama)$"),
+):
     """Run the agent labeler on ALL unlabeled machines. Returns summary."""
+    use_local = None if provider == "auto" else (provider == "ollama")
     with get_connection() as conn:
         machines = fetch_machines(conn)
         already_labeled = set()
@@ -178,6 +190,7 @@ def label_batch():
                 m.machine_id,
                 tags=[m.machine_id, "batch"],
                 metadata={"machine_id": m.machine_id, "source": "batch"},
+                use_local_slm=use_local,
             )
             if "error" in result and not result.get("machine_label"):
                 results["failed"] += 1

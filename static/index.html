@@ -437,6 +437,13 @@
   <div class="tab-actions">
     <button class="btn btn-outline" id="plotOnlyBtn" disabled>Show Plots</button>
     <button class="btn btn-compare" id="compareBtn" disabled>Compare All Sensors</button>
+    <label style="font-size:.78rem;font-weight:600;color:var(--muted);display:flex;align-items:center;gap:6px;">
+      Provider
+      <select id="providerSelect" class="review-select" style="height:34px;min-width:120px;font-weight:600;">
+        <option value="gemini">Gemini (Cloud)</option>
+        <option value="ollama">Ollama (Local)</option>
+      </select>
+    </label>
     <button class="btn btn-agent" id="agentBtn" disabled>Label Machine (AI Agent)</button>
   </div>
 </div>
@@ -516,6 +523,7 @@ const sensorTabs      = document.getElementById("sensorTabs");
 const plotOnlyBtn     = document.getElementById("plotOnlyBtn");
 const compareBtn      = document.getElementById("compareBtn");
 const agentBtn        = document.getElementById("agentBtn");
+const providerSelect  = document.getElementById("providerSelect");
 const batchBtn        = document.getElementById("batchBtn");
 const exportBtn       = document.getElementById("exportBtn");
 const emptyState      = document.getElementById("emptyState");
@@ -807,7 +815,8 @@ async function runAgentLabeling() {
   machineResult.classList.remove("visible");
 
   try {
-    const res = await fetch(`${API}/label/machine/${currentMachine.machine_id}`, { method: "POST" });
+    const prov = providerSelect.value;
+    const res = await fetch(`${API}/label/machine/${currentMachine.machine_id}?provider=${prov}`, { method: "POST" });
     if (!res.ok) {
       const err = await res.json().catch(() => ({ detail: "Unknown error" }));
       throw new Error(err.detail || `HTTP ${res.status}`);
@@ -871,7 +880,8 @@ async function runBatchLabeling() {
   batchBtn.disabled = true;
 
   try {
-    const res = await fetch(`${API}/label/batch`, { method: "POST" });
+    const prov = providerSelect.value;
+    const res = await fetch(`${API}/label/batch?provider=${prov}`, { method: "POST" });
     const data = await res.json();
     alert(`Batch complete: ${data.succeeded} labeled, ${data.failed} failed out of ${data.total} machines.`);
     loadMachines();
