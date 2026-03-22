@@ -45,6 +45,7 @@ from config import (
     OLLAMA_BASE_URL,
     OLLAMA_MODEL,
     POSITION_ORDER,
+    PROMPT_VERSION,
     RECENT_WINDOW_DAYS,
     SAMPLES_PER_DAY,
     USE_LOCAL_SLM,
@@ -65,6 +66,8 @@ class AgentState(TypedDict):
     machine_id: str
     machine_type: str
     use_local_slm: bool
+    raw_context: str
+    raw_response: str
     final_result: dict
 
 
@@ -490,6 +493,7 @@ def prepare(state: AgentState) -> dict:
     return {
         "messages": [HumanMessage(content=content)],
         "machine_type": machine_type,
+        "raw_context": prompt_text,
     }
 
 
@@ -540,6 +544,9 @@ def finalize(state: AgentState) -> dict:
     result["tool_calls"] = tool_calls
     result["machine_id"] = state["machine_id"]
     result["machine_type"] = state["machine_type"]
+    result["raw_context"] = state.get("raw_context", "")
+    result["raw_response"] = raw
+    result["prompt_version"] = PROMPT_VERSION
     return {"final_result": result}
 
 
@@ -636,6 +643,8 @@ def run_machine_analysis(
             "machine_type": "",
             "messages": [],
             "use_local_slm": local,
+            "raw_context": "",
+            "raw_response": "",
             "final_result": {},
         },
         config,

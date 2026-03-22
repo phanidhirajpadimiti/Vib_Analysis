@@ -124,6 +124,9 @@ CREATE TABLE IF NOT EXISTS machine_labels (
     review_status TEXT DEFAULT 'pending',
     human_label TEXT,
     human_notes TEXT,
+    raw_context_fed_to_llm TEXT,
+    raw_llm_response TEXT,
+    prompt_version TEXT,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     reviewed_at TIMESTAMP
 )
@@ -149,9 +152,16 @@ CREATE TABLE IF NOT EXISTS sensor_labels (
 
 
 def ensure_labels_tables(conn: sqlite3.Connection):
-    """Create the label tables if they don't exist."""
+    """Create the label tables if they don't exist, and migrate schema for
+    existing databases (non-destructive — adds nullable columns only)."""
     conn.execute(_CREATE_MACHINE_LABELS)
     conn.execute(_CREATE_SENSOR_LABELS)
+
+    existing = {r[1] for r in conn.execute("PRAGMA table_info(machine_labels)").fetchall()}
+    for col in ("raw_context_fed_to_llm", "raw_llm_response", "prompt_version"):
+        if col not in existing:
+            conn.execute(f"ALTER TABLE machine_labels ADD COLUMN {col} TEXT")
+
     conn.commit()
 
 
@@ -172,8 +182,9 @@ def save_labels(conn: sqlite3.Connection, result: dict):
         "INSERT OR REPLACE INTO machine_labels "
         "(machine_id, machine_type, iso_class, agent_label, agent_confidence, "
         " agent_rationale, recommended_action, tools_reasoning, tool_calls_json, "
-        " review_status, human_label, human_notes, created_at) "
-        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        " review_status, human_label, human_notes, "
+        " raw_context_fed_to_llm, raw_llm_response, prompt_version, created_at) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (
             machine_id, machine_type, iso_class,
             result.get("machine_label", "unknown"),
@@ -182,7 +193,11 @@ def save_labels(conn: sqlite3.Connection, result: dict):
             result.get("recommended_action", ""),
             result.get("tools_reasoning", ""),
             json.dumps(result.get("tool_calls", [])),
-            "pending", None, None, now,
+            "pending", None, None,
+            result.get("raw_context", ""),
+            result.get("raw_response", ""),
+            result.get("prompt_version", ""),
+            now,
         ),
     )
 

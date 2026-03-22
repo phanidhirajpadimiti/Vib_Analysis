@@ -77,6 +77,9 @@ LABEL_TAXONOMY = ["healthy", "unhealthy", "monitor"]
 # ── LangSmith observability (opt-in via LANGCHAIN_TRACING_V2 env var) ──
 LANGSMITH_PROJECT = os.getenv("LANGCHAIN_PROJECT", "viblabel")
 
+# ── Telemetry / prompt versioning ──
+PROMPT_VERSION = "v1.0_baseline"
+
 # ── Local SLM via Ollama (opt-in via USE_LOCAL_SLM env var) ──
 USE_LOCAL_SLM = os.getenv("USE_LOCAL_SLM", "false").lower() == "true"
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
