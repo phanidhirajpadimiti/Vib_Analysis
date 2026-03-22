@@ -54,8 +54,14 @@ flowchart TB
         CSV["vibration_labels.csv<br/><i>final_label = human override ?? agent label</i>"]
     end
 
+    subgraph OBS["<b>Observability</b> &nbsp;·&nbsp; LangSmith"]
+        direction LR
+        LS["Traces · Latency · Token Usage · Cost"]
+    end
+
     FRONTEND -- "HTTP" --> API
     R1 & R2 -- "invoke" --> AGENT
+    AGENT -. "traces" .-> OBS
     P --> LLM
     LLM <-- "tool calls" --> TN
     LLM --> FIN
@@ -85,6 +91,9 @@ flowchart TB
     style T2 fill:#a5d6a7,stroke:#388e3c,color:#1b5e20
     style T3 fill:#a5d6a7,stroke:#388e3c,color:#1b5e20
     style T4 fill:#a5d6a7,stroke:#388e3c,color:#1b5e20
+
+    style OBS fill:#fff9c4,stroke:#f9a825,stroke-width:2px,color:#f57f17
+    style LS fill:#fff9c4,stroke:#f9a825,color:#f57f17
 ```
 
 ### Labeling Flow
@@ -132,16 +141,17 @@ flowchart LR
 - **Human-in-the-loop** — reviewers can accept or override agent labels per-sensor, with overrides taking precedence in exports
 - **Batch processing** — label all unlabeled machines in one click
 - **ML-ready export** — CSV with `final_label` column (human override ?? agent label) for direct pipeline ingestion
+- **LangSmith observability** — opt-in tracing of every agent run, tool call, and LLM invocation with latency, token usage, and cost tracking
 
 ## Tech Stack
 
 | Layer | Technology |
 |-------|-----------|
 | Agent framework | LangGraph (state graph, tool nodes, conditional routing) |
-| LLM | Google Gemini 2.5 Flash (multimodal — reads plots + calls tools) |
-| LLM integration | LangChain (`langchain-google-genai`) |
+| LLM | Google Gemini 2.5 Flash via `langchain-google-genai` |
 | Backend | FastAPI + Uvicorn |
 | Database | SQLite (sensor data + label storage) |
+| Observability | LangSmith (opt-in tracing, token/cost tracking) |
 | Plotting | Matplotlib (thread-safe, Figure API) |
 | Frontend | Vanilla HTML/CSS/JS |
 
@@ -160,9 +170,10 @@ flowchart LR
 ├── api.py               # FastAPI endpoints (label, review, export, data, plots)
 │
 ├── static/index.html    # Labeling dashboard with human review
-├── tests/               # pytest suite
+├── tests/               # pytest suite (tools + API endpoints)
+├── scripts/             # Utility scripts (tracing verification)
 │
-├── .env.example         # Template for API key
+├── .env.example         # Template for API keys (Gemini + LangSmith)
 ├── requirements.txt     # Dependencies
 └── README.md
 ```
@@ -181,9 +192,10 @@ source .venv/bin/activate
 # 3. Install dependencies
 pip install -r requirements.txt
 
-# 4. Set your Gemini API key
+# 4. Configure environment
 cp .env.example .env
-# Edit .env and add your key (get one at https://aistudio.google.com/app/apikey)
+# Edit .env — add your Gemini key (https://aistudio.google.com/app/apikey)
+# Optionally add your LangSmith key for observability (https://smith.langchain.com)
 
 # 5. Generate synthetic data
 python generate_data.py
@@ -216,6 +228,22 @@ pytest tests/ -v
 | Zone B with upward trend, borderline B/C | monitor | medium |
 | Zone C or D, strong trend, clear fault | unhealthy | high |
 | Conflicting cross-sensor signals | varies | low (flagged for review) |
+
+## Observability (LangSmith)
+
+Tracing is **opt-in**. When `LANGCHAIN_TRACING_V2=true` is set in `.env`, every agent invocation is traced to [LangSmith](https://smith.langchain.com) with:
+
+- Full graph execution path (prepare → agent → tools → finalize)
+- Per-tool inputs/outputs as child spans
+- Gemini LLM token usage and cost
+- `run_name`, `tags`, and `metadata` for filtering (single vs batch, by machine ID)
+
+```bash
+# Verify tracing is working
+python scripts/test_tracing.py
+```
+
+When tracing is off (no env vars set), there is zero overhead — the agent runs identically.
 
 ## Data Model
 
