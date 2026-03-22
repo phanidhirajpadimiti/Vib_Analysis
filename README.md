@@ -1,6 +1,6 @@
 # VibLabel — Agentic Data Labeling for Vibration Analysis
 
-An LLM-powered labeling tool that uses a **LangGraph agent** backed by Google Gemini to generate quality labels for industrial vibration sensor data. The labeled data is designed for training or validating machine learning models for predictive maintenance.
+An LLM-powered labeling tool that uses a **LangGraph agent** to generate quality labels for industrial vibration sensor data. Supports **dual providers** — Google Gemini (cloud) or Llama 3.2 Vision via Ollama (local) — selectable per-request from the dashboard. The labeled data is designed for training or validating machine learning models for predictive maintenance.
 
 Instead of replacing ML inference, this tool **produces the training and validation data** that ML models need — automating what traditionally requires expensive domain experts annotating sensor readings by hand.
 
@@ -31,7 +31,7 @@ flowchart TB
         subgraph GRAPH[" "]
             direction LR
             P["Prepare<br/><i>load data + plots</i>"]
-            LLM["Agent Node<br/><i>Gemini 2.5 Flash</i>"]
+            LLM["Agent Node<br/><i>Gemini or Ollama</i>"]
             TN["Tool Node<br/><i>auto-execute</i>"]
             FIN["Finalize<br/><i>parse labels</i>"]
         end
@@ -105,9 +105,9 @@ flowchart LR
     PREP["<b>prepare</b><br/>Load machine data<br/>Generate 8 overview plots<br/>Include ISO 10816 context"]
     PREP --> AGT
 
-    AGT["<b>agent</b><br/>Gemini 2.5 Flash<br/>Reads plots + tool results<br/>Applies labeling guidelines"]
+    AGT["<b>agent</b><br/>Gemini or Ollama<br/>Reads plots + tool results<br/>Applies labeling guidelines"]
 
-    AGT -->|"tool_calls"| TOOL["<b>tools</b><br/>get_iso_assessment<br/>get_sensor_stats<br/>compare_recent_vs_historical<br/>get_cross_sensor_comparison"]
+    AGT -->|"tool_calls (Gemini)"| TOOL["<b>tools</b><br/>get_iso_assessment<br/>get_sensor_stats<br/>compare_recent_vs_historical<br/>get_cross_sensor_comparison"]
     TOOL -->|"results"| AGT
 
     AGT -->|"done"| FIN["<b>finalize</b><br/>Parse structured labels<br/>Assign confidence levels<br/>Save to label store"]
@@ -132,6 +132,7 @@ flowchart LR
 | Edge cases need human judgment | Human-in-the-loop review for low-confidence labels |
 | Labels need to be explainable | Every label includes rationale, tool evidence, and ISO zone reference |
 | ML models need structured training data | One-click CSV export with `final_label` column |
+| Sensor data cannot leave the facility | Local SLM mode via Ollama — zero data leaves the device |
 
 ## Key Features
 
@@ -140,6 +141,7 @@ flowchart LR
 - **Confidence scoring** — each label has a confidence level (high/medium/low) that prioritizes human review effort
 - **Human-in-the-loop** — reviewers can accept or override agent labels per-sensor, with overrides taking precedence in exports
 - **Batch processing** — label all unlabeled machines in one click
+- **Dual provider** — switch between Gemini (cloud) and Llama 3.2 Vision via Ollama (local) per-request from the dashboard
 - **ML-ready export** — CSV with `final_label` column (human override ?? agent label) for direct pipeline ingestion
 - **LangSmith observability** — opt-in tracing of every agent run, tool call, and LLM invocation with latency, token usage, and cost tracking
 
@@ -148,7 +150,8 @@ flowchart LR
 | Layer | Technology |
 |-------|-----------|
 | Agent framework | LangGraph (state graph, tool nodes, conditional routing) |
-| LLM | Google Gemini 2.5 Flash via `langchain-google-genai` |
+| LLM (cloud) | Google Gemini 2.5 Flash via `langchain-google-genai` |
+| LLM (local) | Llama 3.2 Vision 11B via Ollama + `langchain-ollama` |
 | Backend | FastAPI + Uvicorn |
 | Database | SQLite (sensor data + label storage) |
 | Observability | LangSmith (opt-in tracing, token/cost tracking) |
@@ -166,14 +169,14 @@ flowchart LR
 ├── generate_data.py     # Synthetic data generator (13 machines × 4 sensors)
 ├── query_data.py        # CLI database explorer
 │
-├── agent.py             # LangGraph agent (4 tools including ISO assessment)
+├── agent.py             # LangGraph agent (dual-provider, 4 tools incl. ISO assessment)
 ├── api.py               # FastAPI endpoints (label, review, export, data, plots)
 │
 ├── static/index.html    # Labeling dashboard with human review
 ├── tests/               # pytest suite (tools + API endpoints)
-├── scripts/             # Utility scripts (tracing verification)
+├── scripts/             # Utility scripts (tracing verification, benchmarking)
 │
-├── .env.example         # Template for API keys (Gemini + LangSmith)
+├── .env.example         # Template for API keys (Gemini + LangSmith + Ollama)
 ├── requirements.txt     # Dependencies
 └── README.md
 ```
@@ -197,6 +200,10 @@ cp .env.example .env
 # Edit .env — add your Gemini key (https://aistudio.google.com/app/apikey)
 # Optionally add your LangSmith key for observability (https://smith.langchain.com)
 
+# 4b. (Optional) For local SLM mode — install Ollama and pull the model
+brew install ollama
+ollama pull llama3.2-vision:11b
+
 # 5. Generate synthetic data
 python generate_data.py
 
@@ -215,8 +222,8 @@ pytest tests/ -v
 
 ## How the Labeling Works
 
-1. **Select a machine** (or click "Label All Unlabeled" for batch mode)
-2. **Agent labels** — the LLM inspects 8 sensor plots, calls ISO assessment + statistical tools, and assigns per-sensor labels with confidence
+1. **Select a machine** and choose a **provider** (Gemini or Ollama) from the dashboard
+2. **Agent labels** — the LLM inspects 8 sensor plots, uses ISO assessment + statistical tools, and assigns per-sensor labels with confidence
 3. **Review** — low-confidence labels are flagged; reviewers can accept or override any label
 4. **Export** — download `vibration_labels.csv` where `final_label` = human override when present, otherwise agent label
 
@@ -244,6 +251,25 @@ python scripts/test_tracing.py
 ```
 
 When tracing is off (no env vars set), there is zero overhead — the agent runs identically.
+
+## Local SLM Mode (Ollama)
+
+For environments where sensor data cannot leave the facility, VibLabel supports fully local inference via Ollama + Llama 3.2 Vision 11B. The provider is selectable per-request from the dashboard dropdown — no server restart needed.
+
+| | Gemini (Cloud) | Ollama (Local) |
+|---|---|---|
+| Architecture | Multi-turn tool calling | Single-pass with pre-computed tools |
+| Model | Gemini 2.5 Flash | Llama 3.2 Vision 11B |
+| Data privacy | Data sent to Google API | Zero data leaves the device |
+| Tool execution | LLM decides which tools to call | All tools run upfront, results injected into prompt |
+| Speed | Fast (API) | Depends on hardware |
+
+```bash
+# Benchmark local vs cloud
+python scripts/benchmark_local_vs_cloud.py
+```
+
+The server default is controlled by `USE_LOCAL_SLM` in `.env`, but the dashboard dropdown overrides it per-request.
 
 ## Data Model
 
